@@ -2,5 +2,27 @@
 name = "broker_client"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Async Rust client for A-share and Taiwan stock broker servers"
+license = "MIT"
+
+[features]
+default = ["client-a", "client-tw"]
+client-a = []
+client-tw = []
+ws = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
+tokio = { version = "1", features = ["time"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-tungstenite = { version = "0.28", optional = true }
+futures-util = { version = "0.3", optional = true }
+tracing = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wiremock = "0.6"
