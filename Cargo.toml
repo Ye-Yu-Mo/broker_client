@@ -7,7 +7,7 @@ description = "Async Rust client for A-share and Taiwan stock broker servers"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Ye-Yu-Mo/broker_client"
-keywords = ["trading", "broker", "a-share", "taiwan-stock", "websocket", "async"]
+keywords = ["trading", "broker", "a-share", "taiwan-stock", "websocket"]
 categories = ["finance", "web-programming::websocket"]
 
 [features]
