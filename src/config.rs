@@ -21,6 +21,14 @@ pub struct ClientConfig {
     pub timeout: Duration,
     /// Number of additional attempts for safe GET requests. `0` disables retry.
     pub retry: u32,
+    /// Maximum WebSocket reconnect attempts before giving up.
+    pub ws_max_reconnect_attempts: u32,
+    /// Base backoff (milliseconds) between WebSocket reconnects.
+    pub ws_base_backoff_ms: u64,
+    /// Optional separate WebSocket base URL.
+    ///
+    /// When `None`, the WebSocket URL is derived from [`Self::base_url`].
+    pub ws_base_url: Option<String>,
     /// Value sent as `User-Agent`.
     pub user_agent: String,
     /// Extra headers merged into every request.
@@ -36,6 +44,9 @@ impl ClientConfig {
             auth_method: AuthMethod::default(),
             timeout: Duration::from_secs(10),
             retry: 2,
+            ws_max_reconnect_attempts: 5,
+            ws_base_backoff_ms: 500,
+            ws_base_url: None,
             user_agent: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
             default_headers: HashMap::new(),
         }
@@ -78,6 +89,24 @@ impl ClientConfig {
     /// Builder-style override for [`Self::retry`].
     pub fn retry(mut self, retry: u32) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Builder-style override for [`Self::ws_max_reconnect_attempts`].
+    pub fn ws_max_reconnect_attempts(mut self, attempts: u32) -> Self {
+        self.ws_max_reconnect_attempts = attempts;
+        self
+    }
+
+    /// Builder-style override for [`Self::ws_base_backoff_ms`].
+    pub fn ws_base_backoff_ms(mut self, millis: u64) -> Self {
+        self.ws_base_backoff_ms = millis;
+        self
+    }
+
+    /// Builder-style override for [`Self::ws_base_url`].
+    pub fn ws_base_url(mut self, ws_base_url: impl Into<String>) -> Self {
+        self.ws_base_url = Some(ws_base_url.into());
         self
     }
 
@@ -134,6 +163,9 @@ mod tests {
         assert_eq!(config.auth_method, AuthMethod::Bearer);
         assert_eq!(config.timeout, Duration::from_secs(10));
         assert_eq!(config.retry, 2);
+        assert_eq!(config.ws_max_reconnect_attempts, 5);
+        assert_eq!(config.ws_base_backoff_ms, 500);
+        assert_eq!(config.ws_base_url, None);
     }
 
     #[test]

@@ -13,7 +13,7 @@ client-tw = []
 ws = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt", "sync"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

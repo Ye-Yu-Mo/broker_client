@@ -41,6 +41,21 @@ where
             })
         }
     }
+
+    /// Checks that the envelope succeeded and ignores the payload.
+    ///
+    /// This is useful for endpoints whose success response has no `data` field.
+    pub fn into_unit(self) -> Result<()> {
+        if self.code == 0 {
+            Ok(())
+        } else {
+            Err(Error::Api {
+                code: self.code.to_string(),
+                message: self.message,
+                detail: Value::Null,
+            })
+        }
+    }
 }
 
 /// TW failure envelope: `{ "detail": { "code": ..., "message": ..., "detail": ... } }`.

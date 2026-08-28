@@ -8,7 +8,7 @@ Async Rust client library for the TW and A-share stock broker servers.
 |---|---|---|
 | `client-a` | yes | A-share server client (`AClient`) |
 | `client-tw` | yes | TW server client (`TwClient`) |
-| `ws` | no | WebSocket dependencies (reserved for later milestones) |
+| `ws` | no | WebSocket event stream and auto-reconnect support |
 
 ```bash
 cargo build --no-default-features          # common core only
@@ -52,6 +52,7 @@ let config = ClientConfig::new("http://127.0.0.1:8787")
     .auth_method(AuthMethod::Bearer) // or AuthMethod::XAuthToken
     .timeout(Duration::from_secs(5))
     .retry(1)
+    .ws_base_url("wss://127.0.0.1:9000/") // optional, defaults to base_url
     .user_agent("my-trader/1.0")
     .default_header("X-Environment", "UAT");
 
