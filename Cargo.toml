@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 description = "Async Rust client for A-share and Taiwan stock broker servers"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Ye-Yu-Mo/broker_client"
+keywords = ["trading", "broker", "a-share", "taiwan-stock", "websocket", "async"]
+categories = ["finance", "web-programming::websocket"]
 
 [features]
 default = ["client-a", "client-tw"]
