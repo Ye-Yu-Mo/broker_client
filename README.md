@@ -4,8 +4,8 @@
 
 面向两个券商交易 server 的 Rust 异步客户端库：
 
-- **A 股 server**（`AClient`）— 同花顺 macOS 自动化交易服务
-- **台股 server**（`TwClient`）— stock-broker-tw-server 台股交易服务
+- **A 股 server**（`AClient`）— [stock_broker_a_server](https://github.com/Ye-Yu-Mo/stock_broker_a_server)：同花顺 macOS 自动化交易服务
+- **台股 server**（`TwClient`）— [stock-broker-tw-server](https://github.com/Ye-Yu-Mo/stock-broker-tw-server)：台股交易服务
 
 库提供统一的异步 HTTP 基础、类型化模型、WebSocket 事件流、自动重连、缓存降级元数据，以及安全的写操作默认行为。
 
@@ -29,8 +29,8 @@ cargo build --all-features                 # 两个客户端 + WebSocket
 
 | Client | Server | 默认地址 |
 |---|---|---|
-| `AClient` | A 股 / 同花顺 server | `http://127.0.0.1:8787` |
-| `TwClient` | stock-broker-tw-server | `http://127.0.0.1:8000` |
+| `AClient` | [A 股 / 同花顺 server](https://github.com/Ye-Yu-Mo/stock_broker_a_server) | `http://127.0.0.1:8787` |
+| `TwClient` | [stock-broker-tw-server](https://github.com/Ye-Yu-Mo/stock-broker-tw-server) | `http://127.0.0.1:8000` |
 
 两个客户端都支持 `Authorization: Bearer <token>` 和 `X-Auth-Token: <token>`。
 默认使用 `Bearer`；A 股 server 同时接受 `X-Auth-Token`。
