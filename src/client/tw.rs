@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, encode_path_segment};
 use crate::error::Result;
 use crate::http::HttpClient;
 use crate::response::TwEnvelope;
@@ -43,6 +43,11 @@ impl TwClient {
 
     /// Calls `GET /health` and returns the parsed health JSON.
     pub async fn health(&self) -> Result<Value> {
+        self.http.get_json("/health").await
+    }
+
+    /// Calls `GET /health` and returns a typed [`Health`] value.
+    pub async fn health_info(&self) -> Result<Health> {
         self.http.get_json("/health").await
     }
 
@@ -452,7 +457,7 @@ impl TwClient {
 
     /// Gets one order by `client_order_id`.
     pub async fn get_order(&self, client_order_id: &str) -> Result<OrderRecord> {
-        let path = format!("/api/v1/orders/{client_order_id}");
+        let path = format!("/api/v1/orders/{}", encode_path_segment(client_order_id));
         self.tw_get(&path, &[]).await
     }
 
@@ -487,7 +492,10 @@ impl TwClient {
         client_order_id: &str,
         request: &RecoveryResolveRequest,
     ) -> Result<RecoveryItem> {
-        let path = format!("/api/v1/recovery/{client_order_id}/resolve");
+        let path = format!(
+            "/api/v1/recovery/{}/resolve",
+            encode_path_segment(client_order_id)
+        );
         self.tw_post(&path, request).await
     }
 
@@ -540,6 +548,27 @@ mod tests {
         let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
         let value = client.health().await.unwrap();
         assert_eq!(value["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn health_info_parses_typed_health() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "ok",
+                "adapter_ready": true,
+                "login_status": true,
+                "panic": false
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let health = client.health_info().await.unwrap();
+        assert_eq!(health.status, "ok");
+        assert!(health.adapter_ready);
+        assert!(health.login_status);
     }
 
     #[tokio::test]
@@ -1032,6 +1061,24 @@ mod tests {
                 .as_deref(),
             Some("C1")
         );
+    }
+
+    #[tokio::test]
+    async fn get_order_url_encodes_special_client_order_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/a%2Fb%3Fc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": "ok",
+                "data": {"client_order_id": "a/b?c", "status": "FILLED"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let order = client.get_order("a/b?c").await.unwrap();
+        assert_eq!(order.client_order_id.as_deref(), Some("a/b?c"));
     }
 
     #[tokio::test]

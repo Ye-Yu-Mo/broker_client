@@ -53,6 +53,7 @@ name = "broker_client"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
@@ -60,6 +61,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
  "uuid",
  "wiremock",
 ]

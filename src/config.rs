@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
 use crate::auth::AuthMethod;
 
 /// Common configuration for both TW and A-share clients.
@@ -22,6 +24,9 @@ pub struct ClientConfig {
     /// Number of additional attempts for safe GET requests. `0` disables retry.
     pub retry: u32,
     /// Maximum WebSocket reconnect attempts before giving up.
+    ///
+    /// A value of `0` means retry forever; the stream keeps reconnecting until
+    /// the channel is closed.
     pub ws_max_reconnect_attempts: u32,
     /// Base backoff (milliseconds) between WebSocket reconnects.
     pub ws_base_backoff_ms: u64,
@@ -148,11 +153,19 @@ pub fn join_url(base_url: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
+/// Percent-encodes a single URL path segment.
+///
+/// This is intentionally strict: every non-alphanumeric byte is encoded so
+/// values such as `client_order_id` cannot accidentally change the route.
+pub(crate) fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{ClientConfig, join_url};
+    use super::{ClientConfig, encode_path_segment, join_url};
     use crate::auth::AuthMethod;
 
     #[test]
@@ -220,5 +233,11 @@ mod tests {
             join_url("http://127.0.0.1:8000/", "v1/health"),
             "http://127.0.0.1:8000/v1/health"
         );
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_special_characters() {
+        assert_eq!(encode_path_segment("abc123"), "abc123");
+        assert_eq!(encode_path_segment("a/b?c#d e"), "a%2Fb%3Fc%23d%20e");
     }
 }

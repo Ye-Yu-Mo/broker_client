@@ -41,6 +41,8 @@ pub enum Error {
     WebSocket(String),
     /// Invalid URL or URL composition error.
     InvalidUrl(String),
+    /// Client-side validation failed before a request was sent.
+    InvalidRequest(String),
 }
 
 impl fmt::Display for Error {
@@ -63,6 +65,7 @@ impl fmt::Display for Error {
             }
             Error::WebSocket(msg) => write!(f, "websocket error: {msg}"),
             Error::InvalidUrl(url) => write!(f, "invalid url: {url}"),
+            Error::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
         }
     }
 }
@@ -105,7 +108,8 @@ impl Error {
             Error::Api { .. }
             | Error::Decode { .. }
             | Error::WebSocket(_)
-            | Error::InvalidUrl(_) => false,
+            | Error::InvalidUrl(_)
+            | Error::InvalidRequest(_) => false,
         }
     }
 }
@@ -142,6 +146,13 @@ mod tests {
             detail: json!({"id": "x"}),
         };
         assert!(err.to_string().contains("ORDER_NOT_FOUND"));
+    }
+
+    #[test]
+    fn invalid_request_is_not_retryable_and_has_clear_message() {
+        let err = Error::InvalidRequest("replace must set new_price and/or new_quantity".into());
+        assert!(err.to_string().contains("invalid request"));
+        assert!(!err.is_retryable());
     }
 
     #[test]

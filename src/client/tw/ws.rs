@@ -66,6 +66,10 @@ fn parse_event(text: &str) -> TwEvent {
     })
 }
 
+fn encoded_token(token: &str) -> String {
+    url::form_urlencoded::byte_serialize(token.as_bytes()).collect()
+}
+
 fn ws_url(client: &TwClient) -> String {
     let http_base = client
         .config()
@@ -79,7 +83,7 @@ fn ws_url(client: &TwClient) -> String {
     if let Some(token) = client.config().token.as_deref() {
         if !token.is_empty() {
             url.push_str("?token=");
-            url.push_str(token);
+            url.push_str(&encoded_token(token));
         }
     }
     url

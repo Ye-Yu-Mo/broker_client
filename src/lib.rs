@@ -29,6 +29,19 @@ pub use client::tw::{
 #[cfg(feature = "client-a")]
 pub use client::AClient;
 
+#[cfg(feature = "client-a")]
+pub use client::a::{
+    AEvent, AccountFunds, Cached, CancelRequest, Order, PanicRequest, Pnl, RefreshResponse,
+    ReplaceRequest, Trade, Transaction,
+};
+
+#[cfg(feature = "client-a")]
+pub use client::a::Health as AHealth;
+#[cfg(feature = "client-a")]
+pub use client::a::OrderRequest as AOrderRequest;
+#[cfg(feature = "client-a")]
+pub use client::a::Position as APosition;
+
 pub use auth::AuthMethod;
 pub use config::ClientConfig;
 pub use error::{Error, Result};
