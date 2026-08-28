@@ -1,6 +1,15 @@
 # broker_client
 
-Async Rust client library for the TW and A-share stock broker servers.
+[![CI](https://github.com/Ye-Yu-Mo/broker_client/actions/workflows/ci.yml/badge.svg)](https://github.com/Ye-Yu-Mo/broker_client/actions/workflows/ci.yml)
+
+Async Rust client library for two stock broker servers:
+
+- **A-share server** (`AClient`) — 同花顺 macOS 自动化交易服务
+- **TW server** (`TwClient`) — stock-broker-tw-server 台股交易服务
+
+The library provides a shared async HTTP foundation, typed models, WebSocket
+event streams, automatic reconnection, cache-downgrade metadata and safe
+write-operation defaults.
 
 ## Features
 
@@ -17,6 +26,16 @@ cargo build --features client-a            # only A-share client
 cargo build --features client-a,client-tw  # both (default)
 cargo build --all-features                 # both + WebSocket
 ```
+
+## Supported servers
+
+| Client | Server | Default base URL |
+|---|---|---|
+| `AClient` | A-share / 同花顺 server | `http://127.0.0.1:8787` |
+| `TwClient` | stock-broker-tw-server | `http://127.0.0.1:8000` |
+
+Both clients support `Authorization: Bearer <token>` and `X-Auth-Token: <token>`.
+By default `Bearer` is used; the A-share server also accepts `X-Auth-Token`.
 
 ## Quick start
 
@@ -87,8 +106,14 @@ The default is `5` finite reconnect attempts.
 
 ## WebSocket events
 
-Enable the `ws` feature. A-share events keep the raw `data` and `timestamp_ms`
-from the server; unknown event types are delivered as `AEvent::Unknown`.
+Enable the `ws` feature. Both clients expose:
+
+- `connect_ws()` — single WebSocket stream
+- `event_stream()` — auto-reconnecting event stream
+
+A-share events keep the raw `data` and `timestamp_ms` from the server; unknown
+event types are delivered as `AEvent::Unknown`. TW events are parsed into
+`TwEvent` and unknown types are also preserved.
 
 ```rust,no_run
 # #[cfg(feature = "ws")]
@@ -108,10 +133,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # }
 ```
 
-The A server may mark read-only responses with `from_cache: true` and
+## Cache-downgrade metadata
+
+The A-share server may mark read-only responses with `from_cache: true` and
 `cached_at`. The client preserves these markers on `Cached<T>` values returned
-by `account()`, `positions()`, `orders_by_status()`, `pnl()`,
-`transactions()`, and the order list/detail methods.
+by:
+
+- `account()`
+- `positions()`
+- `pnl()`
+- `transactions()`
+- `list_orders()` / `list_trades()` / `orders_by_status()`
+- `get_order()`
+
+## Write-operation safety
+
+Write operations (`submit_order`, `cancel_order`, `replace_order`,
+`submit_stock_order`, `panic`, `resume`, etc.) are **not automatically
+retried**. This prevents accidental duplicate orders, cancels or replaces.
+
+The A-share `replace_order` does **not** implicitly implement
+"cancel then re-submit"; callers must implement that workflow explicitly if
+needed.
 
 ## Error handling
 
@@ -126,6 +169,46 @@ match client.health().await {
     Ok(_) => {}
     Err(Error::Timeout) => eprintln!("timed out"),
     Err(Error::Api { code, message, .. }) => eprintln!("{code}: {message}"),
+    Err(Error::InvalidRequest(message)) => eprintln!("invalid request: {message}"),
     Err(err) => eprintln!("{err}"),
 }
 ```
+
+## Project layout
+
+```text
+src/
+├── auth.rs            # Bearer / X-Auth-Token helpers
+├── config.rs          # shared ClientConfig and URL helpers
+├── error.rs           # unified Error / Result
+├── http.rs            # shared async HTTP client
+├── response.rs        # TW / A-share response envelope parsing
+└── client/
+    ├── a/             # A-share server client
+    │   ├── mod.rs
+    │   ├── types.rs
+    │   └── ws.rs
+    └── tw/            # TW server client
+        ├── mod.rs
+        ├── types.rs
+        └── ws.rs
+```
+
+## Development
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo doc --no-deps --all-features
+```
+
+## Documentation
+
+- `docs/a-client-api.md` — A-share server API
+- `docs/tw-client-api.md` — TW server API
+- `CHANGELOG.md` — release history
+
+## License
+
+MIT
