@@ -145,6 +145,12 @@ pub struct Position {
     /// Market value.
     #[serde(default)]
     pub market_value: Option<f64>,
+    /// Today's position (今仓): bought today and not yet T+1 tradable.
+    #[serde(default)]
+    pub today_qty: Option<f64>,
+    /// Yesterday's position (昨仓): base position from previous trading days.
+    #[serde(default)]
+    pub yesterday_qty: Option<f64>,
     /// Profit/loss amount.
     #[serde(default)]
     pub pnl: Option<f64>,
@@ -517,6 +523,23 @@ pub struct RefreshResponse {
     pub extra: Value,
 }
 
+/// Response for `POST /v1/notify/test`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct NotifyTestResponse {
+    /// Whether the test notification was sent successfully.
+    #[serde(default)]
+    pub ok: bool,
+    /// Notification title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Notification message body.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Unknown response fields.
+    #[serde(default, flatten, skip_serializing_if = "Value::is_null")]
+    pub extra: Value,
+}
+
 /// Request body for `POST /v1/control/panic`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PanicRequest {
@@ -728,10 +751,14 @@ mod tests {
         let position: Position = serde_json::from_value(json!({
             "symbol": "512100",
             "quantity": 100,
+            "today_qty": 200.0,
+            "yesterday_qty": 900.0,
             "extra_field": 1
         }))
         .unwrap();
         assert_eq!(position.symbol.as_deref(), Some("512100"));
+        assert_eq!(position.today_qty, Some(200.0));
+        assert_eq!(position.yesterday_qty, Some(900.0));
         assert_eq!(position.extra["extra_field"], 1);
 
         let order: Order = serde_json::from_value(json!({

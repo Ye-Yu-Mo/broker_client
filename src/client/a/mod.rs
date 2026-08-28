@@ -134,6 +134,11 @@ impl AClient {
         self.a_post("/v1/refresh", &serde_json::json!({})).await
     }
 
+    /// Calls `POST /v1/notify/test`.
+    pub async fn notify_test(&self) -> Result<NotifyTestResponse> {
+        self.a_post("/v1/notify/test", &serde_json::json!({})).await
+    }
+
     /// Calls `POST /v1/orders`.
     pub async fn submit_order(&self, request: &OrderRequest) -> Result<Order> {
         self.a_post("/v1/orders", request).await
@@ -427,6 +432,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notify_test_posts_v1_notify_test() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/notify/test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "title": "自动熔断",
+                "message": "测试报警"
+            })))
+            .mount(&server)
+            .await;
+
+        let result = client(&server).notify_test().await.unwrap();
+        assert!(result.ok);
+        assert_eq!(result.title.as_deref(), Some("自动熔断"));
+        assert_eq!(result.message.as_deref(), Some("测试报警"));
+    }
+
+    #[tokio::test]
     async fn submit_order_sends_documented_body_for_dry_run_and_real() {
         let server = MockServer::start().await;
         for (dry_run, expected) in [(false, false), (true, true)] {
@@ -550,6 +574,7 @@ mod tests {
             ("GET", "/v1/health"),
             ("GET", "/v1/metrics"),
             ("POST", "/v1/refresh"),
+            ("POST", "/v1/notify/test"),
             ("POST", "/v1/orders"),
             ("POST", "/v1/orders/C001/cancel"),
             ("POST", "/v1/orders/C001/replace"),
@@ -580,6 +605,7 @@ mod tests {
         assert!(a.health_info().await.is_err());
         assert!(a.metrics().await.is_err());
         assert!(a.refresh().await.is_err());
+        assert!(a.notify_test().await.is_err());
         assert!(
             a.submit_order(&OrderRequest::new("C", "S", "buy", 1.0, 1, false))
                 .await

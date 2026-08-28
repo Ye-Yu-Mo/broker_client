@@ -16,6 +16,29 @@
 
 ---
 
+## [0.2.0] - 2026-08-28
+
+### Added
+
+- A 股 `Position` 新增 `today_qty`（今仓）和 `yesterday_qty`（昨仓）字段
+- `AClient` 新增 `notify_test()`，对应 `POST /v1/notify/test`
+- 新增 `NotifyTestResponse` 类型
+- 更新 `docs/a-client-api.md`，同步 A 股 server v0.3.0 接口变更
+
+### Changed
+
+- 无（向后兼容新增）
+
+### Fixed
+
+- 无
+
+### Security
+
+- 无
+
+---
+
 ## [0.1.0] - 2026-08-28
 
 ### Added

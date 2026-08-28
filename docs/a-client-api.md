@@ -20,7 +20,7 @@ X-Auth-Token: <token>
 ## 只读接口
 
 - `GET /v1/account`：资金账户，返回 `AccountFunds`
-- `GET /v1/positions`：持仓列表；会自动切换到持仓面板后刷新
+- `GET /v1/positions`：持仓列表；会自动切换到持仓面板后刷新；每项包含 `today_qty`（今仓）和 `yesterday_qty`（昨仓）
 - `GET /v1/orders?type=order`：委托列表；会自动切换到委托面板后刷新
 - `GET /v1/orders?type=trade`：成交列表；会自动切换到成交面板后刷新
 - `GET /v1/orders?status=Confirmed`：本地订单记录按状态筛选
@@ -37,6 +37,10 @@ X-Auth-Token: <token>
 ### `POST /v1/refresh`
 
 刷新同花顺账户快照并持久化。
+
+### `POST /v1/notify/test`
+
+发送飞书测试报警，便于验证 webhook 配置。无需请求体。
 
 ### `POST /v1/orders`
 

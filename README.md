@@ -35,6 +35,11 @@ cargo build --all-features                 # 两个客户端 + WebSocket
 两个客户端都支持 `Authorization: Bearer <token>` 和 `X-Auth-Token: <token>`。
 默认使用 `Bearer`；A 股 server 同时接受 `X-Auth-Token`。
 
+A 股客户端额外支持：
+
+- 持仓 `today_qty` / `yesterday_qty`（今仓 / 昨仓）
+- `notify_test()`：发送飞书测试报警，对应 `POST /v1/notify/test`
+
 ## 快速开始
 
 ```rust,no_run

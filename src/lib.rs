@@ -31,8 +31,8 @@ pub use client::AClient;
 
 #[cfg(feature = "client-a")]
 pub use client::a::{
-    AEvent, AccountFunds, Cached, CancelRequest, Order, PanicRequest, Pnl, RefreshResponse,
-    ReplaceRequest, Trade, Transaction,
+    AEvent, AccountFunds, Cached, CancelRequest, NotifyTestResponse, Order, PanicRequest, Pnl,
+    RefreshResponse, ReplaceRequest, Trade, Transaction,
 };
 
 #[cfg(feature = "client-a")]
