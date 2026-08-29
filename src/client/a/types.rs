@@ -726,6 +726,62 @@ impl<'de> Deserialize<'de> for AEvent {
     }
 }
 
+impl From<AEvent> for crate::types::BrokerEvent {
+    fn from(event: AEvent) -> Self {
+        use crate::types::BrokerEvent;
+
+        match event {
+            AEvent::OrderUpdated { data, timestamp_ms } => {
+                BrokerEvent::OrderUpdated { data, timestamp_ms }
+            }
+            AEvent::PositionChanged { data, timestamp_ms } => {
+                BrokerEvent::PositionChanged { data, timestamp_ms }
+            }
+            AEvent::AccountChanged { data, timestamp_ms } => {
+                BrokerEvent::AccountChanged { data, timestamp_ms }
+            }
+            AEvent::AccountBalanceChanged { data, timestamp_ms } => {
+                BrokerEvent::AccountBalanceChanged { data, timestamp_ms }
+            }
+            AEvent::QueryCacheHit {
+                data,
+                from_cache,
+                cached_at,
+                timestamp_ms,
+            } => BrokerEvent::QueryCacheHit {
+                data,
+                from_cache,
+                cached_at,
+                timestamp_ms,
+            },
+            AEvent::ReplaceUpdated { data, timestamp_ms } => {
+                BrokerEvent::ReplaceUpdated { data, timestamp_ms }
+            }
+            AEvent::OrderNoMapping { data, timestamp_ms } => {
+                BrokerEvent::OrderNoMapping { data, timestamp_ms }
+            }
+            AEvent::OrderManualReview { data, timestamp_ms } => {
+                BrokerEvent::OrderManualReview { data, timestamp_ms }
+            }
+            AEvent::RiskPanic { data, timestamp_ms } => {
+                BrokerEvent::RiskPanic { data, timestamp_ms }
+            }
+            AEvent::HealthChanged { data, timestamp_ms } => {
+                BrokerEvent::HealthChanged { data, timestamp_ms }
+            }
+            AEvent::Unknown {
+                type_name,
+                data,
+                timestamp_ms,
+            } => BrokerEvent::Unknown {
+                type_name,
+                data,
+                timestamp_ms,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -977,6 +1033,44 @@ mod tests {
                 assert_eq!(type_name, "future.event");
                 assert_eq!(data["x"], 1);
                 assert_eq!(timestamp_ms, Some(42));
+            }
+            _ => panic!("expected unknown"),
+        }
+    }
+
+    #[test]
+    fn a_event_converts_to_unified_broker_event() {
+        let event: AEvent = serde_json::from_value(json!({
+            "type": "order.updated",
+            "timestamp_ms": 42,
+            "data": {"client_order_id": "C1"}
+        }))
+        .unwrap();
+        let unified: crate::types::BrokerEvent = event.into();
+        assert!(matches!(
+            unified,
+            crate::types::BrokerEvent::OrderUpdated {
+                timestamp_ms: Some(42),
+                ..
+            }
+        ));
+
+        let unknown: AEvent = serde_json::from_value(json!({
+            "type": "future.event",
+            "timestamp_ms": 7,
+            "data": {"x": 1}
+        }))
+        .unwrap();
+        let unified: crate::types::BrokerEvent = unknown.into();
+        match unified {
+            crate::types::BrokerEvent::Unknown {
+                type_name,
+                data,
+                timestamp_ms,
+            } => {
+                assert_eq!(type_name, "future.event");
+                assert_eq!(data["x"], 1);
+                assert_eq!(timestamp_ms, Some(7));
             }
             _ => panic!("expected unknown"),
         }

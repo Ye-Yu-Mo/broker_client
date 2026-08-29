@@ -40,6 +40,54 @@ A 股客户端额外支持：
 - 持仓 `today_qty` / `yesterday_qty`（今仓 / 昨仓）
 - `notify_test()`：发送飞书测试报警，对应 `POST /v1/notify/test`
 
+## 统一抽象 `BrokerClient`
+
+`AClient` 和 `TwClient` 都实现了同一个 [`BrokerClient`] trait。通过
+`Box<dyn BrokerClient>`，调用方可以用同一份代码操作两个 server：
+
+```rust,no_run
+use broker_client::{AClient, BrokerClient, CancelOrderRequest, ClientConfig, OrderRequest, TwClient};
+
+async fn unified_flow(client: &dyn BrokerClient, order: OrderRequest) {
+    let _ = client.health().await;
+    let _ = client.account().await;
+    let _ = client.positions().await;
+    let _ = client.submit_order(&order).await;
+    let _ = client.get_order(&order.client_order_id).await;
+    let _ = client.cancel_order(&CancelOrderRequest::new(order.client_order_id.clone())).await;
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tw: Box<dyn BrokerClient> = Box::new(TwClient::new(ClientConfig::tw_default()));
+    let a: Box<dyn BrokerClient> = Box::new(AClient::new(ClientConfig::a_default()));
+
+    unified_flow(tw.as_ref(), OrderRequest::new(
+        "tw-1", "S98875005091", "2330", "B", 500.0, 1, "ROD", "LIMIT",
+    )).await;
+
+    unified_flow(a.as_ref(), OrderRequest::a_new(
+        "a-1", "512100", "buy", 3.305, 100, true,
+    )).await;
+
+    Ok(())
+}
+```
+
+完整示例见 [`examples/unified_flow.rs`](examples/unified_flow.rs)。
+
+### 统一类型映射
+
+| 旧类型 | 统一类型 | 说明 |
+|---|---|---|
+| A `OrderRequest` / TW `OrderRequest` | `types::OrderRequest` | `client_order_id`、`symbol`/`stk_code`、`side`、`price`、`quantity` 为公共字段；A 的 `dry_run`、TW 的 `account`/`time_in_force`/`price_flag` 等以 `Option` 保留 |
+| TW `OrderStatus` | `types::OrderStatus` | 同时兼容 A `Order` 的 `name`、`message`、`created_at` 等字段 |
+| A `Position` / TW `Position` | `types::Position` | A 的 `today_qty` / `yesterday_qty`、TW 的 `stock_name` / `market_type` 都保留 |
+| A `AccountFunds` / TW `Balance` | `types::Account` | `total_asset`、`available`、`total_balance`、`withdrawable` 等均可用 |
+| A `AEvent` / TW `TwEvent` | `types::BrokerEvent` | 统一事件枚举，未知事件保留原始 `type`、`data`、`timestamp_ms` |
+
+旧的 `AClient` / `TwClient` 专用类型和方法继续保留，现有调用方无需修改。
+
 ## 快速开始
 
 ```rust,no_run

@@ -208,6 +208,158 @@ impl Default for AClient {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::client::broker::BrokerClient for AClient {
+    fn config(&self) -> &ClientConfig {
+        self.config()
+    }
+
+    async fn health(&self) -> Result<crate::types::Health> {
+        let health = self.health_info().await?;
+        Ok(crate::types::Health {
+            status: health.status,
+            ths_online: health.ths_online,
+            ax_permission: health.ax_permission,
+            gui_queue: health.gui_queue,
+            gui_busy: health.gui_busy,
+            gui_queue_depth: health.gui_queue_depth,
+            last_refresh_at_ms: health.last_refresh_at_ms,
+            last_cancel_success: health.last_cancel_success,
+            last_order_success: health.last_order_success,
+            last_refresh: health.last_refresh,
+            last_operation: health.last_operation,
+            panic: health.panic,
+            audit_writable: health.audit_writable,
+            version: health.version,
+            timestamp_ms: health.timestamp_ms,
+            ..Default::default()
+        })
+    }
+
+    async fn account(&self) -> Result<crate::types::Account> {
+        let cached = self.account().await?;
+        Ok(crate::types::Account {
+            account: cached.data.account,
+            currency: cached.data.currency,
+            total_asset: cached.data.total_asset,
+            available: cached.data.available,
+            market_value: cached.data.market_value,
+            frozen: cached.data.frozen,
+            cash: cached.data.cash,
+            updated_at: cached.data.updated_at,
+            from_cache: cached.from_cache,
+            cached_at: cached.cached_at,
+            extra: cached.data.extra,
+            ..Default::default()
+        })
+    }
+
+    async fn positions(&self) -> Result<Vec<crate::types::Position>> {
+        let cached = self.positions().await?;
+        Ok(cached.data.into_iter().map(Into::into).collect())
+    }
+
+    async fn submit_order(
+        &self,
+        request: &crate::types::OrderRequest,
+    ) -> Result<crate::types::OrderStatus> {
+        let symbol = request.symbol.as_deref().unwrap_or(&request.stk_code);
+        let side = request.side.as_deref().ok_or_else(|| {
+            crate::Error::InvalidRequest("unified order request is missing side".to_owned())
+        })?;
+        let price = request.price.ok_or_else(|| {
+            crate::Error::InvalidRequest("unified order request is missing price".to_owned())
+        })?;
+        let quantity = request.quantity.ok_or_else(|| {
+            crate::Error::InvalidRequest("unified order request is missing quantity".to_owned())
+        })?;
+        let a_request = OrderRequest {
+            client_order_id: request.client_order_id.clone(),
+            symbol: symbol.to_owned(),
+            side: side.to_owned(),
+            price,
+            quantity,
+            dry_run: request.dry_run.unwrap_or(false),
+        };
+        let order = self.submit_order(&a_request).await?;
+        Ok(order.into())
+    }
+
+    async fn cancel_order(
+        &self,
+        request: &crate::types::CancelOrderRequest,
+    ) -> Result<crate::types::OrderStatus> {
+        let order = self
+            .cancel_order(&request.client_order_id, request.reason.as_deref())
+            .await?;
+        Ok(order.into())
+    }
+
+    async fn get_order(&self, client_order_id: &str) -> Result<crate::types::OrderStatus> {
+        let cached = self.get_order(client_order_id).await?;
+        Ok(cached.data.into())
+    }
+
+    #[cfg(feature = "ws")]
+    async fn event_stream(
+        &self,
+    ) -> Result<std::pin::Pin<Box<dyn futures_util::Stream<Item = crate::types::BrokerEvent> + Send>>>
+    {
+        use futures_util::StreamExt;
+
+        let stream = self.event_stream().await?;
+        Ok(Box::pin(stream.map(crate::types::BrokerEvent::from)))
+    }
+}
+
+impl From<Position> for crate::types::Position {
+    fn from(position: Position) -> Self {
+        Self {
+            account: position.account,
+            symbol: position.symbol,
+            stk_code: None,
+            name: position.name,
+            stock_name: None,
+            market_type: None,
+            quantity: position.quantity,
+            available_quantity: position.available_quantity,
+            cost_price: position.cost_price,
+            last_price: position.last_price,
+            market_price: position.market_price,
+            market_value: position.market_value,
+            today_qty: position.today_qty,
+            yesterday_qty: position.yesterday_qty,
+            pnl: position.pnl,
+            pnl_ratio: position.pnl_ratio,
+            updated_at: position.updated_at,
+            extra: position.extra,
+        }
+    }
+}
+
+impl From<Order> for crate::types::OrderStatus {
+    fn from(order: Order) -> Self {
+        Self {
+            client_order_id: order.client_order_id,
+            status: order.status,
+            order_no: order.order_no,
+            symbol: order.symbol,
+            stk_code: None,
+            side: order.side,
+            price: order.price,
+            quantity: order.quantity,
+            filled_quantity: order.filled_quantity,
+            name: order.name,
+            message: order.message,
+            dry_run: order.dry_run,
+            created_at: order.created_at,
+            updated_at: order.updated_at,
+            extra: order.extra,
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

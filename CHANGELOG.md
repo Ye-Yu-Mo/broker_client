@@ -16,6 +16,29 @@
 
 ---
 
+## [0.3.0] - 2026-08-29
+
+### Added
+
+- 新增统一类型模型 `src/types.rs`：`OrderRequest`、`OrderStatus`、`Position`、`Account`、`BrokerEvent`、`CancelOrderRequest`
+- 新增 `BrokerClient` trait，`AClient` / `TwClient` 均可作为 `Box<dyn BrokerClient>` 使用
+- 新增 `examples/unified_flow.rs` 统一 trait 示例
+- 新增 A/TW WebSocket `BrokerEvent` 统一事件流转换测试
+
+### Changed
+
+- TW `OrderRequest`、`OrderStatus`、`Position` 改为统一类型的 alias，保留旧构造器与字段
+
+### Fixed
+
+- 修复 rustdoc 链接警告
+
+### Security
+
+- 无
+
+---
+
 ## [0.2.1] - 2026-08-29
 
 ### Added

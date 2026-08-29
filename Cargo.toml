@@ -1,6 +1,6 @@
 [package]
 name = "broker_client"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Async Rust client for A-share and Taiwan stock broker servers"
@@ -25,6 +25,7 @@ url = "2"
 percent-encoding = "2"
 tokio-tungstenite = { version = "0.28", optional = true }
 futures-util = { version = "0.3", optional = true }
+async-trait = "0.1"
 tracing = "0.1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }

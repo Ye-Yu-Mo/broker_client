@@ -13,6 +13,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod response;
+pub mod types;
 
 #[cfg(feature = "client-tw")]
 pub use client::TwClient;
@@ -20,10 +21,9 @@ pub use client::TwClient;
 #[cfg(feature = "client-tw")]
 pub use client::tw::{
     Balance, ClassifyPrice, Health, Kline, LoginInfo, LoginList, LoginRequest, LoginResponse,
-    OrderAction, OrderRecord, OrderRequest, OrderStatus, OrderTradeReport, PnlRealized,
-    PnlReversal, PnlUnrealized, Position, QuoteSnapshot, QuoteSubscription, QuoteType, RealReport,
-    RealReportMerge, RecoveryItem, RecoveryResolveRequest, SessionStatus, Settlement, StockInfo,
-    SubscribedSource, Tick, TwEvent,
+    OrderAction, OrderRecord, OrderTradeReport, PnlRealized, PnlReversal, PnlUnrealized,
+    QuoteSnapshot, QuoteSubscription, QuoteType, RealReport, RealReportMerge, RecoveryItem,
+    RecoveryResolveRequest, SessionStatus, Settlement, StockInfo, SubscribedSource, Tick, TwEvent,
 };
 
 #[cfg(feature = "client-a")]
@@ -43,5 +43,7 @@ pub use client::a::OrderRequest as AOrderRequest;
 pub use client::a::Position as APosition;
 
 pub use auth::AuthMethod;
+pub use client::BrokerClient;
 pub use config::ClientConfig;
 pub use error::{Error, Result};
+pub use types::{Account, BrokerEvent, CancelOrderRequest, OrderRequest, OrderStatus, Position};

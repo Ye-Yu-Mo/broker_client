@@ -522,6 +522,152 @@ impl Default for TwClient {
     }
 }
 
+fn unified_to_tw_request(
+    request: &crate::types::OrderRequest,
+) -> Result<crate::types::OrderRequest> {
+    if request.side.is_none() {
+        return Err(crate::Error::InvalidRequest(
+            "unified order request is missing side".to_owned(),
+        ));
+    }
+
+    let mut tw = request.clone();
+    if tw.symbol.is_none() {
+        tw.symbol = Some(tw.stk_code.clone());
+    }
+    Ok(tw)
+}
+
+#[async_trait::async_trait]
+impl crate::client::broker::BrokerClient for TwClient {
+    fn config(&self) -> &ClientConfig {
+        self.config()
+    }
+
+    async fn health(&self) -> Result<crate::types::Health> {
+        let health = self.health_info().await?;
+        Ok(crate::types::Health {
+            status: Some(health.status),
+            adapter_ready: Some(health.adapter_ready),
+            login_status: Some(health.login_status),
+            event_queue_size: Some(health.event_queue_size),
+            audit_enabled: Some(health.audit_enabled),
+            audit_file: health.audit_file,
+            version: Some(health.version),
+            environment: Some(health.environment),
+            panic: Some(serde_json::Value::Bool(health.panic)),
+            circuit_breaker_open: Some(health.circuit_breaker_open),
+            circuit_breaker: health.circuit_breaker,
+            last_failure: health.last_failure,
+            last_recovery: health.last_recovery,
+            extra: health.extra,
+            ..Default::default()
+        })
+    }
+
+    async fn account(&self) -> Result<crate::types::Account> {
+        let balance = self.balance(None).await?;
+        Ok(crate::types::Account {
+            account: balance.account,
+            currency: balance.currency,
+            total_balance: balance.total_balance,
+            available_balance: balance.available_balance,
+            frozen: balance.frozen,
+            withdrawable: balance.withdrawable,
+            updated_at: balance.updated_at,
+            extra: balance.extra,
+            ..Default::default()
+        })
+    }
+
+    async fn positions(&self) -> Result<Vec<crate::types::Position>> {
+        self.positions(None).await
+    }
+
+    async fn submit_order(
+        &self,
+        request: &crate::types::OrderRequest,
+    ) -> Result<crate::types::OrderStatus> {
+        let tw_request = unified_to_tw_request(request)?;
+        self.submit_stock_order(&tw_request).await
+    }
+
+    async fn cancel_order(
+        &self,
+        request: &crate::types::CancelOrderRequest,
+    ) -> Result<crate::types::OrderStatus> {
+        let account = request.account.as_deref().ok_or_else(|| {
+            crate::Error::InvalidRequest("TW cancel request is missing account".to_owned())
+        })?;
+        let order_no = request.order_no.as_deref().ok_or_else(|| {
+            crate::Error::InvalidRequest("TW cancel request is missing order_no".to_owned())
+        })?;
+        let trade_date = request.trade_date.as_deref().ok_or_else(|| {
+            crate::Error::InvalidRequest("TW cancel request is missing trade_date".to_owned())
+        })?;
+        let stk_code = request
+            .stk_code
+            .as_deref()
+            .or(request.symbol.as_deref())
+            .ok_or_else(|| {
+                crate::Error::InvalidRequest(
+                    "TW cancel request is missing stk_code/symbol".to_owned(),
+                )
+            })?;
+        let side = request.side.as_deref().ok_or_else(|| {
+            crate::Error::InvalidRequest("TW cancel request is missing side".to_owned())
+        })?;
+        let tw_request = crate::types::OrderRequest::cancel(
+            &request.client_order_id,
+            account,
+            order_no,
+            trade_date,
+            stk_code,
+            side,
+        );
+        self.submit_stock_order(&tw_request).await
+    }
+
+    async fn get_order(&self, client_order_id: &str) -> Result<crate::types::OrderStatus> {
+        let record = self.get_order(client_order_id).await?;
+        Ok(record.into())
+    }
+
+    #[cfg(feature = "ws")]
+    async fn event_stream(
+        &self,
+    ) -> Result<std::pin::Pin<Box<dyn futures_util::Stream<Item = crate::types::BrokerEvent> + Send>>>
+    {
+        use futures_util::StreamExt;
+
+        let stream = self.event_stream().await?;
+        Ok(Box::pin(stream.map(crate::types::BrokerEvent::from)))
+    }
+}
+
+impl From<OrderRecord> for crate::types::OrderStatus {
+    fn from(record: OrderRecord) -> Self {
+        let symbol = record.stk_code.clone();
+        Self {
+            client_order_id: record.client_order_id,
+            status: record.status,
+            order_no: record.order_no,
+            trade_date: record.trade_date,
+            account: record.account,
+            stk_code: record.stk_code,
+            symbol,
+            side: record.side,
+            price: record.price,
+            quantity: record.quantity,
+            filled_quantity: record.filled_quantity,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            extra: record.extra,
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

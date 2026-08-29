@@ -190,51 +190,9 @@ pub struct SessionStatus {
 }
 
 /// A stock position.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct Position {
-    /// Account that owns the position.
-    #[serde(default)]
-    pub account: Option<String>,
-    /// Stock code.
-    #[serde(default)]
-    pub stk_code: Option<String>,
-    /// Stock name.
-    #[serde(default)]
-    pub stock_name: Option<String>,
-    /// Market type, e.g. `TWSE`.
-    #[serde(default)]
-    pub market_type: Option<String>,
-    /// Total quantity.
-    #[serde(default)]
-    pub quantity: Option<f64>,
-    /// Available/tradable quantity.
-    #[serde(default)]
-    pub available_quantity: Option<f64>,
-    /// Cost price.
-    #[serde(default)]
-    pub cost_price: Option<f64>,
-    /// Last traded price.
-    #[serde(default)]
-    pub last_price: Option<f64>,
-    /// Market price.
-    #[serde(default)]
-    pub market_price: Option<f64>,
-    /// Market value.
-    #[serde(default)]
-    pub market_value: Option<f64>,
-    /// Unrealized P&L.
-    #[serde(default)]
-    pub pnl: Option<f64>,
-    /// Unrealized P&L ratio.
-    #[serde(default)]
-    pub pnl_ratio: Option<f64>,
-    /// Last update time.
-    #[serde(default)]
-    pub updated_at: Option<String>,
-    /// Unknown response fields.
-    #[serde(default, flatten, skip_serializing_if = "Value::is_null")]
-    pub extra: Value,
-}
+///
+/// This is an alias of the unified [`crate::types::Position`] super-set.
+pub use crate::types::Position;
 
 /// Account bank balance.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -674,218 +632,20 @@ pub struct StockInfo {
 }
 
 /// Order action for `POST /api/v1/orders/stock`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OrderAction {
-    /// New order.
-    New,
-    /// Cancel order.
-    Cancel,
-    /// Replace order (price or quantity).
-    Replace,
-}
+///
+/// Re-exported from the unified type model.
+pub use crate::types::OrderAction;
 
 /// A type-safe TW order request.
 ///
-/// The `replace` action intentionally keeps `new_price` and `new_quantity`
-/// exclusive: only one of them should be set.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct OrderRequest {
-    /// Client-generated idempotency key.
-    pub client_order_id: String,
-    /// Order action.
-    pub action: OrderAction,
-    /// Account number.
-    pub account: String,
-    /// Stock code.
-    pub stk_code: String,
-    /// Side (`B`/`S`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub side: Option<String>,
-    /// Limit price.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price: Option<f64>,
-    /// Order quantity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quantity: Option<i64>,
-    /// Time in force, e.g. `ROD`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub time_in_force: Option<String>,
-    /// Price flag, e.g. `LIMIT`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_flag: Option<String>,
-    /// Broker order number (cancel/replace).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub order_no: Option<String>,
-    /// Trade date (cancel/replace).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trade_date: Option<String>,
-    /// New price (replace price).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_price: Option<f64>,
-    /// New quantity (replace quantity).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_quantity: Option<i64>,
-}
-
-impl OrderRequest {
-    /// Constructs a new-order request.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        client_order_id: impl Into<String>,
-        account: impl Into<String>,
-        stk_code: impl Into<String>,
-        side: impl Into<String>,
-        price: f64,
-        quantity: i64,
-        time_in_force: impl Into<String>,
-        price_flag: impl Into<String>,
-    ) -> Self {
-        Self {
-            client_order_id: client_order_id.into(),
-            action: OrderAction::New,
-            account: account.into(),
-            stk_code: stk_code.into(),
-            side: Some(side.into()),
-            price: Some(price),
-            quantity: Some(quantity),
-            time_in_force: Some(time_in_force.into()),
-            price_flag: Some(price_flag.into()),
-            order_no: None,
-            trade_date: None,
-            new_price: None,
-            new_quantity: None,
-        }
-    }
-
-    /// Constructs a cancel-order request.
-    #[allow(clippy::too_many_arguments)]
-    pub fn cancel(
-        client_order_id: impl Into<String>,
-        account: impl Into<String>,
-        order_no: impl Into<String>,
-        trade_date: impl Into<String>,
-        stk_code: impl Into<String>,
-        side: impl Into<String>,
-    ) -> Self {
-        Self {
-            client_order_id: client_order_id.into(),
-            action: OrderAction::Cancel,
-            account: account.into(),
-            stk_code: stk_code.into(),
-            side: Some(side.into()),
-            price: None,
-            quantity: None,
-            time_in_force: None,
-            price_flag: None,
-            order_no: Some(order_no.into()),
-            trade_date: Some(trade_date.into()),
-            new_price: None,
-            new_quantity: None,
-        }
-    }
-
-    /// Constructs a replace-price request.
-    #[allow(clippy::too_many_arguments)]
-    pub fn replace_price(
-        client_order_id: impl Into<String>,
-        account: impl Into<String>,
-        order_no: impl Into<String>,
-        stk_code: impl Into<String>,
-        side: impl Into<String>,
-        new_price: f64,
-    ) -> Self {
-        Self {
-            client_order_id: client_order_id.into(),
-            action: OrderAction::Replace,
-            account: account.into(),
-            stk_code: stk_code.into(),
-            side: Some(side.into()),
-            price: None,
-            quantity: None,
-            time_in_force: None,
-            price_flag: None,
-            order_no: Some(order_no.into()),
-            trade_date: None,
-            new_price: Some(new_price),
-            new_quantity: None,
-        }
-    }
-
-    /// Constructs a replace-quantity request.
-    #[allow(clippy::too_many_arguments)]
-    pub fn replace_quantity(
-        client_order_id: impl Into<String>,
-        account: impl Into<String>,
-        order_no: impl Into<String>,
-        stk_code: impl Into<String>,
-        side: impl Into<String>,
-        new_quantity: i64,
-    ) -> Self {
-        Self {
-            client_order_id: client_order_id.into(),
-            action: OrderAction::Replace,
-            account: account.into(),
-            stk_code: stk_code.into(),
-            side: Some(side.into()),
-            price: None,
-            quantity: None,
-            time_in_force: None,
-            price_flag: None,
-            order_no: Some(order_no.into()),
-            trade_date: None,
-            new_price: None,
-            new_quantity: Some(new_quantity),
-        }
-    }
-}
+/// This is an alias of the unified [`crate::types::OrderRequest`] super-set;
+/// the TW constructors remain available on that type.
+pub use crate::types::OrderRequest;
 
 /// Order status payload returned by order endpoints and pushed by WebSocket.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct OrderStatus {
-    /// Client order ID.
-    #[serde(default)]
-    pub client_order_id: Option<String>,
-    /// Current order status.
-    #[serde(default)]
-    pub status: Option<String>,
-    /// Broker order number.
-    #[serde(default)]
-    pub order_no: Option<String>,
-    /// Trade date.
-    #[serde(default)]
-    pub trade_date: Option<String>,
-    /// Account number.
-    #[serde(default)]
-    pub account: Option<String>,
-    /// Stock code.
-    #[serde(default)]
-    pub stk_code: Option<String>,
-    /// Side (`B`/`S`).
-    #[serde(default)]
-    pub side: Option<String>,
-    /// Order price.
-    #[serde(default)]
-    pub price: Option<f64>,
-    /// Order quantity.
-    #[serde(default)]
-    pub quantity: Option<f64>,
-    /// Filled quantity.
-    #[serde(default)]
-    pub filled_quantity: Option<f64>,
-    /// Original request payload.
-    #[serde(default)]
-    pub request: Option<Value>,
-    /// Extra data payload.
-    #[serde(default)]
-    pub data: Option<Value>,
-    /// Last error, if any.
-    #[serde(default)]
-    pub last_error: Option<Value>,
-    /// Unknown response fields.
-    #[serde(default, flatten, skip_serializing_if = "Value::is_null")]
-    pub extra: Value,
-}
+///
+/// This is an alias of the unified [`crate::types::OrderStatus`] super-set.
+pub use crate::types::OrderStatus;
 
 /// A full order record returned by order query endpoints.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -1023,6 +783,7 @@ impl RecoveryResolveRequest {
 /// in [`TwEvent::Unknown`] so a future server addition never breaks parsing.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
+#[allow(clippy::large_enum_variant)]
 pub enum TwEvent {
     /// `welcome`
     Welcome {
@@ -1110,6 +871,89 @@ impl<'de> serde::Deserialize<'de> for TwEvent {
             "SubscribeStockInformation" => TwEvent::SubscribeStockInformation(data),
             _ => TwEvent::Unknown { type_name, data },
         })
+    }
+}
+
+impl From<TwEvent> for crate::types::BrokerEvent {
+    fn from(event: TwEvent) -> Self {
+        use crate::types::BrokerEvent;
+
+        match event {
+            TwEvent::Welcome { message } => BrokerEvent::Welcome { message },
+            TwEvent::Login(login) => BrokerEvent::Login {
+                data: serde_json::json!({
+                    "account": login.account,
+                    "name": login.name,
+                    "investor_id": login.investor_id,
+                    "login": login.login.map(|login_list| serde_json::json!({
+                        "login_list": login_list.login_list.into_iter().map(|info| serde_json::json!({
+                            "account": info.account,
+                            "name": info.name,
+                            "investor_id": info.investor_id,
+                        })).collect::<Vec<_>>(),
+                    })),
+                }),
+                timestamp_ms: None,
+            },
+            TwEvent::RR_RealReport(data) => BrokerEvent::RealReport {
+                data,
+                timestamp_ms: None,
+            },
+            TwEvent::RR_RealReportMerge(data) => BrokerEvent::RealReportMerge {
+                data,
+                timestamp_ms: None,
+            },
+            TwEvent::RealReport(report) => BrokerEvent::RealReport {
+                data: serde_json::json!({
+                    "account": report.account,
+                    "order_no": report.order_no,
+                    "trade_date": report.trade_date,
+                    "stk_code": report.stk_code,
+                    "side": report.side,
+                    "price": report.price,
+                    "quantity": report.quantity,
+                }),
+                timestamp_ms: None,
+            },
+            TwEvent::RealReportMerge(report) => BrokerEvent::RealReportMerge {
+                data: serde_json::json!({
+                    "account": report.account,
+                    "order_no": report.order_no,
+                    "trade_date": report.trade_date,
+                    "stk_code": report.stk_code,
+                    "side": report.side,
+                    "price": report.price,
+                    "quantity": report.quantity,
+                }),
+                timestamp_ms: None,
+            },
+            TwEvent::OrderUpdated(order) => BrokerEvent::OrderUpdated {
+                data: serde_json::to_value(&order).unwrap_or(serde_json::Value::Null),
+                timestamp_ms: None,
+            },
+            TwEvent::QuoteUpdated(data) => BrokerEvent::QuoteUpdated {
+                data,
+                timestamp_ms: None,
+            },
+            TwEvent::Heartbeat(data) => BrokerEvent::Heartbeat {
+                data,
+                timestamp_ms: None,
+            },
+            TwEvent::SubscribeWatchlist(data)
+            | TwEvent::SubscribeWatchlistAll(data)
+            | TwEvent::SubscribeFiveTickA(data)
+            | TwEvent::SubscribeStockTick(data)
+            | TwEvent::SubscribeMarketInformation(data)
+            | TwEvent::SubscribeStockInformation(data) => BrokerEvent::Subscribed {
+                data,
+                timestamp_ms: None,
+            },
+            TwEvent::Unknown { type_name, data } => BrokerEvent::Unknown {
+                type_name,
+                data,
+                timestamp_ms: None,
+            },
+        }
     }
 }
 
@@ -1242,5 +1086,38 @@ mod tests {
             event,
             TwEvent::Unknown { type_name, data } if type_name == "future.event" && data["hello"] == 1
         ));
+    }
+
+    #[test]
+    fn tw_event_converts_to_unified_broker_event() {
+        let event: TwEvent = serde_json::from_value(json!({
+            "type": "order.updated",
+            "data": {"client_order_id": "C1", "status": "FILLED"}
+        }))
+        .unwrap();
+        let unified: crate::types::BrokerEvent = event.into();
+        assert!(matches!(
+            unified,
+            crate::types::BrokerEvent::OrderUpdated { .. }
+        ));
+
+        let unknown: TwEvent = serde_json::from_value(json!({
+            "type": "future.event",
+            "data": {"hello": 1}
+        }))
+        .unwrap();
+        let unified: crate::types::BrokerEvent = unknown.into();
+        match unified {
+            crate::types::BrokerEvent::Unknown {
+                type_name,
+                data,
+                timestamp_ms,
+            } => {
+                assert_eq!(type_name, "future.event");
+                assert_eq!(data["hello"], 1);
+                assert_eq!(timestamp_ms, None);
+            }
+            _ => panic!("expected unknown"),
+        }
     }
 }

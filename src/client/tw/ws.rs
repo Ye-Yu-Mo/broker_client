@@ -380,4 +380,41 @@ mod tests {
             "expected at least one HTTP resubscribe per WebSocket connection"
         );
     }
+
+    #[tokio::test]
+    async fn trait_event_stream_yields_unified_broker_events() {
+        use crate::client::broker::BrokerClient;
+        use crate::types::BrokerEvent;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            ws.send(Message::Text(
+                json!({"type": "order.updated", "data": {"client_order_id": "C1", "status": "FILLED"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let client = TwClient::new(
+            ClientConfig::new("http://127.0.0.1:1")
+                .ws_base_url(format!("http://{addr}"))
+                .ws_max_reconnect_attempts(1)
+                .ws_base_backoff_ms(10),
+        );
+        let client: Box<dyn BrokerClient> = Box::new(client);
+        let mut events = client.event_stream().await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("timed out waiting for unified TW event")
+            .unwrap();
+        assert!(matches!(event, BrokerEvent::OrderUpdated { .. }));
+
+        server.await.unwrap();
+    }
 }
