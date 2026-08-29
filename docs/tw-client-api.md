@@ -403,10 +403,10 @@ POST /api/v1/recovery/{client_order_id}/resolve
 ### 9.1 连接
 
 ```
-WS /ws?token=<api_token>
+WS /ws
 ```
 
-也可以使用请求头 `Authorization: Bearer <api_token>`。
+认证使用请求头 `Authorization: Bearer <api_token>`。
 
 连接成功后先收到：
 
@@ -497,5 +497,5 @@ curl -X POST "$BASE/api/v1/quotes/subscribe" \
 
 ```bash
 # 使用 wscat 或其他 WebSocket 客户端
-wscat -c "ws://127.0.0.1:8000/ws?token=test-token"
+wscat -c "ws://127.0.0.1:8000/ws" -H "Authorization: Bearer test-token"
 ```

@@ -66,10 +66,6 @@ fn parse_event(text: &str) -> TwEvent {
     })
 }
 
-fn encoded_token(token: &str) -> String {
-    url::form_urlencoded::byte_serialize(token.as_bytes()).collect()
-}
-
 fn ws_url(client: &TwClient) -> String {
     let http_base = client
         .config()
@@ -79,14 +75,7 @@ fn ws_url(client: &TwClient) -> String {
     let base = http_base
         .replace("http://", "ws://")
         .replace("https://", "wss://");
-    let mut url = format!("{}/ws", base.trim_end_matches('/'));
-    if let Some(token) = client.config().token.as_deref() {
-        if !token.is_empty() {
-            url.push_str("?token=");
-            url.push_str(&encoded_token(token));
-        }
-    }
-    url
+    format!("{}/ws", base.trim_end_matches('/'))
 }
 
 /// Establishes a single WebSocket connection.
@@ -142,8 +131,6 @@ async fn run_event_loop(client: TwClient, tx: mpsc::Sender<TwEvent>) {
     loop {
         match connect(&client).await {
             Ok(mut ws) => {
-                attempt = 0;
-
                 // Restore the remembered subscriptions through the documented
                 // HTTP subscribe endpoint after every (re)connect.
                 let subscriptions: Vec<QuoteSubscription> = client
@@ -164,6 +151,10 @@ async fn run_event_loop(client: TwClient, tx: mpsc::Sender<TwEvent>) {
                 }
 
                 while let Some(event) = ws.next().await {
+                    // Only a successfully received first event proves the
+                    // connection is usable; reset the retry counter then.
+                    attempt = 0;
+
                     if tx.send(event).await.is_err() {
                         return;
                     }
@@ -296,6 +287,17 @@ mod tests {
             event,
             TwEvent::Unknown { type_name, data } if type_name == "_malformed" && data.is_string()
         ));
+    }
+
+    #[test]
+    fn ws_url_uses_ws_without_token_query() {
+        let client = TwClient::new(
+            ClientConfig::new("http://127.0.0.1:8000")
+                .token("abc/def g")
+                .ws_base_url("http://127.0.0.1:9000/"),
+        );
+        let url = ws_url(&client);
+        assert_eq!(url, "ws://127.0.0.1:9000/ws");
     }
 
     #[tokio::test]

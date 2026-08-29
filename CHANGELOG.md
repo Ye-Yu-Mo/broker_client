@@ -16,6 +16,27 @@
 
 ---
 
+## [0.2.1] - 2026-08-29
+
+### Added
+
+- 无
+
+### Changed
+
+- 更新 TW WebSocket 文档：认证仅使用 `Authorization: Bearer` header，不再通过 URL query 传递 token
+
+### Fixed
+
+- WS 重连计数改为成功收到首个事件后才归零，避免“连接成功但未收到任何事件”时错误重置重连上限
+- 移除 `Mutex::lock().expect(...)` panic 路径，Mutex 中毒时安全恢复继续操作
+
+### Security
+
+- WebSocket token 不再出现在 URL query 中，仅通过 `Authorization: Bearer` header 传递
+
+---
+
 ## [0.2.0] - 2026-08-28
 
 ### Added

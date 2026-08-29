@@ -248,7 +248,7 @@ impl TwClient {
         let mut subscriptions = self
             .subscriptions
             .lock()
-            .expect("subscription mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !subscriptions.contains(request) {
             subscriptions.push(request.clone());
         }
@@ -271,7 +271,7 @@ impl TwClient {
         let mut subscriptions = self
             .subscriptions
             .lock()
-            .expect("subscription mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         subscriptions.retain(|existing| existing != request);
         Ok(())
     }

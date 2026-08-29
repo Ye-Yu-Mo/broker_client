@@ -67,10 +67,6 @@ fn parse_event(text: &str) -> AEvent {
     })
 }
 
-fn encoded_token(token: &str) -> String {
-    url::form_urlencoded::byte_serialize(token.as_bytes()).collect()
-}
-
 fn ws_url(client: &AClient) -> String {
     let http_base = client
         .config()
@@ -80,14 +76,7 @@ fn ws_url(client: &AClient) -> String {
     let base = http_base
         .replace("http://", "ws://")
         .replace("https://", "wss://");
-    let mut url = format!("{}/v1/ws", base.trim_end_matches('/'));
-    if let Some(token) = client.config().token.as_deref() {
-        if !token.is_empty() {
-            url.push_str("?token=");
-            url.push_str(&encoded_token(token));
-        }
-    }
-    url
+    format!("{}/v1/ws", base.trim_end_matches('/'))
 }
 
 /// Establishes a single WebSocket connection.
@@ -140,9 +129,11 @@ async fn run_event_loop(client: AClient, tx: mpsc::Sender<AEvent>) {
     loop {
         match connect(&client).await {
             Ok(mut ws) => {
-                attempt = 0;
-
                 while let Some(event) = ws.next().await {
+                    // Only a successfully received first event proves the
+                    // connection is usable; reset the retry counter then.
+                    attempt = 0;
+
                     if tx.send(event).await.is_err() {
                         return;
                     }
@@ -192,14 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn ws_url_uses_v1_ws_and_url_encodes_token() {
+    fn ws_url_uses_v1_ws_without_token_query() {
         let client = AClient::new(
             ClientConfig::new("http://127.0.0.1:8787")
                 .token("abc/def g")
                 .ws_base_url("http://127.0.0.1:9000/"),
         );
         let url = ws_url(&client);
-        assert_eq!(url, "ws://127.0.0.1:9000/v1/ws?token=abc%2Fdef+g");
+        assert_eq!(url, "ws://127.0.0.1:9000/v1/ws");
     }
 
     #[test]
