@@ -57,7 +57,23 @@ X-Auth-Token: <token>
 }
 ```
 
-`dry_run=true` 只填表单不点确认。返回订单状态和消息。
+`dry_run=true` 只填表单不点确认。
+
+`mock=true` 不提交真实委托：服务端向同花顺交易界面输入证券代码，读取界面上的买一/卖一后模拟全量成交（买入用卖一价，卖出用买一价），并结算到服务端的模拟账户。`mock` 与 `dry_run` **互斥**，同时为 `true` 时服务端返回 `400`；客户端在 `AClient::submit_order` 里就提前拒绝，不发请求。
+
+请求体的 `mock` 字段在 `false` 时**不发送**（服务端默认 `false`），因此不启用 mock 的调用方请求体与旧版本逐字节一致。
+
+返回订单状态和消息。mock 成交的响应额外带：
+
+| 字段 | 含义 |
+|---|---|
+| `mock` | `true` 表示这笔是模拟成交 |
+| `contract_id` | 模拟合同编号，形如 `MOCK-<ms>-<client_order_id>` |
+| `fill_price` | 模拟成交价 |
+| `filled_quantity` | 模拟成交量 |
+| `filled_at_ms` | 模拟成交时间（epoch 毫秒） |
+
+普通真实下单与 dry-run 响应里 `fill_price` / `filled_at_ms` 为 `null`。
 
 ### `POST /v1/orders/{client_order_id}/cancel`
 
@@ -96,6 +112,62 @@ X-Auth-Token: <token>
 ### `POST /v1/control/resume`
 
 解除熔断，恢复交易写操作。
+
+## 模拟账户（mock）
+
+服务端只保留**一个**模拟账户，与同花顺真实账户完全隔离：`mock=true` 的订单和这两个接口都只碰模拟账户，不读取也不修改真实账户快照。模拟账户持久化在服务端，重启后仍在。
+
+### `POST /v1/mock/init_account`
+
+初始化模拟账户。请求：
+
+```json
+{
+  "cash": 100000,
+  "positions": [
+    {
+      "symbol": "518850",
+      "quantity": 1000,
+      "available_quantity": 1000,
+      "average_cost": 9.0
+    }
+  ],
+  "reset": false
+}
+```
+
+`positions` 与 `reset` 可省略。已有模拟账户时默认返回 `409`；只有显式 `reset=true` 才会覆盖现金和持仓。参数非法（现金为负、代码为空或重复、`available_quantity > quantity`）返回 `400`。
+
+响应为模拟账户快照：
+
+```json
+{
+  "cash": 100000.0,
+  "positions": [
+    {
+      "symbol": "518850",
+      "quantity": 1000.0,
+      "available_quantity": 1000.0,
+      "average_cost": 9.0
+    }
+  ],
+  "created_at_ms": 1787910698040,
+  "updated_at_ms": 1787910698040
+}
+```
+
+初始化成功会推送 `mock.account_changed` 事件。
+
+### `GET /v1/mock/account`
+
+读取当前模拟账户，响应结构同上。尚未初始化时返回 `404`。
+
+客户端侧对应：
+
+- `AClient::init_mock_account(&InitMockAccountRequest)` → `POST /v1/mock/init_account`
+- `AClient::mock_account()` → `GET /v1/mock/account`
+
+两个接口的错误都会映射为 `Error::Api`（`code = "error"`），不会退化成看不到服务端消息的传输错误。
 
 ## WebSocket
 

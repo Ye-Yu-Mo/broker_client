@@ -4,6 +4,18 @@
 //! module defines the common super-set used by [`crate::client::BrokerClient`]:
 //! A/TW specific fields are preserved as `Option<T>` so no server-specific
 //! information is lost.
+//!
+//! # Design debt
+//!
+//! [`OrderRequest`] is currently the union of two different wire contracts:
+//! `side` carries both `buy/sell` and `B/S`, an empty `account` means "not
+//! applicable", and `symbol` / `dry_run` use serialization skips to pretend
+//! fields do not exist on one server. Adding more optional fields to this union
+//! makes the model worse, not more unified. The next expansion should replace
+//! it with an explicit sum type such as
+//! `enum UnifiedOrder { A(AOrderRequest), Tw(TwStockOrderRequest) }`, or with
+//! market-specific associated request types on a generic trait. Do not add a
+//! third market by extending this struct with another pile of `Option`s.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,10 +24,11 @@ use serde_json::Value;
 ///
 /// This is the same enum historically exposed by the TW client; it is kept here
 /// so the unified request type can represent new/cancel/replace uniformly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderAction {
     /// New order.
+    #[default]
     New,
     /// Cancel order.
     Cancel,
@@ -23,12 +36,125 @@ pub enum OrderAction {
     Replace,
 }
 
+/// TW domestic-stock order category (`ap_code`).
+///
+/// Requests serialize the readable semantic names accepted by the server. The
+/// custom deserializer also accepts the legacy SDK integers `0/2/4/7`, so old
+/// persisted responses remain readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApCode {
+    /// Regular board-lot trading (`0`).
+    Regular,
+    /// Odd-lot trading (`2`).
+    OddLot,
+    /// Intraday odd-lot trading (`4`).
+    IntradayOddLot,
+    /// After-hours trading (`7`).
+    AfterHours,
+}
+
+impl ApCode {
+    fn from_name(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "REGULAR" => Some(Self::Regular),
+            "ODD_LOT" => Some(Self::OddLot),
+            "INTRADAY_ODD_LOT" => Some(Self::IntradayOddLot),
+            "AFTER_HOURS" => Some(Self::AfterHours),
+            _ => None,
+        }
+    }
+
+    fn invalid(value: impl std::fmt::Display) -> crate::Error {
+        crate::Error::InvalidRequest(format!(
+            "invalid ap_code {value}; expected REGULAR/0, ODD_LOT/2, INTRADAY_ODD_LOT/4, or AFTER_HOURS/7"
+        ))
+    }
+}
+
+impl TryFrom<i32> for ApCode {
+    type Error = crate::Error;
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Regular),
+            2 => Ok(Self::OddLot),
+            4 => Ok(Self::IntradayOddLot),
+            7 => Ok(Self::AfterHours),
+            _ => Err(Self::invalid(value)),
+        }
+    }
+}
+
+#[allow(clippy::fallible_impl_from)]
+impl From<u8> for ApCode {
+    /// Converts a legacy SDK value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `value` is not one of `0/2/4/7`. Use [`ApCode::try_from`]
+    /// for untrusted input; silently mapping an unknown trading category to
+    /// `Regular` could place the wrong kind of order.
+    fn from(value: u8) -> Self {
+        Self::try_from(i32::from(value)).unwrap_or_else(|_| panic!("invalid ap_code {value}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for ApCode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ApCodeVisitor;
+
+        impl serde::de::Visitor<'_> for ApCodeVisitor {
+            type Value = ApCode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("REGULAR/0, ODD_LOT/2, INTRADAY_ODD_LOT/4, or AFTER_HOURS/7")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let value = i32::try_from(value).map_err(E::custom)?;
+                ApCode::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let value = i32::try_from(value).map_err(E::custom)?;
+                ApCode::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if let Some(code) = ApCode::from_name(value) {
+                    return Ok(code);
+                }
+                value
+                    .trim()
+                    .parse::<i32>()
+                    .map_err(|_| E::custom(ApCode::invalid(value)))
+                    .and_then(|value| ApCode::try_from(value).map_err(E::custom))
+            }
+        }
+
+        deserializer.deserialize_any(ApCodeVisitor)
+    }
+}
+
 /// Unified order request.
 ///
 /// The type is a superset of both the A-share and TW order request shapes.
 /// Common fields are `client_order_id`, `symbol`, `side`, `price`, and
 /// `quantity`; server-specific fields are optional.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct OrderRequest {
     /// Client-generated idempotency key.
     pub client_order_id: String,
@@ -79,9 +205,38 @@ pub struct OrderRequest {
     /// uses its dedicated [`crate::client::a::OrderRequest`] for HTTP bodies.
     #[serde(default, skip_serializing)]
     pub dry_run: Option<bool>,
+    /// TW domestic-stock order category.
+    ///
+    /// `None` omits the field so the server applies its `REGULAR` default and
+    /// existing request bodies stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ap_code: Option<ApCode>,
+    /// Mock-mode flag.
+    ///
+    /// A mock order is settled against the server-side simulated account
+    /// instead of reaching the broker. `None` omits the field entirely so the
+    /// body stays byte-identical to 0.3.0; both servers default it to `false`,
+    /// so `None` and `Some(false)` are equivalent on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock: Option<bool>,
 }
 
 impl OrderRequest {
+    /// Sets the TW domestic-stock order category.
+    pub fn with_ap_code(mut self, ap_code: ApCode) -> Self {
+        self.ap_code = Some(ap_code);
+        self
+    }
+
+    /// Sets the mock-mode flag.
+    ///
+    /// This is the only way to opt into mock trading: every constructor leaves
+    /// the flag unset, which keeps existing request bodies unchanged.
+    pub fn with_mock(mut self, mock: bool) -> Self {
+        self.mock = mock.then_some(true);
+        self
+    }
+
     /// Constructs a TW-style new-order request.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -111,6 +266,8 @@ impl OrderRequest {
             new_price: None,
             new_quantity: None,
             dry_run: None,
+            ap_code: None,
+            mock: None,
         }
     }
 
@@ -141,6 +298,8 @@ impl OrderRequest {
             new_price: None,
             new_quantity: None,
             dry_run: Some(dry_run),
+            ap_code: None,
+            mock: None,
         }
     }
 
@@ -171,6 +330,8 @@ impl OrderRequest {
             new_price: None,
             new_quantity: None,
             dry_run: None,
+            ap_code: None,
+            mock: None,
         }
     }
 
@@ -201,6 +362,8 @@ impl OrderRequest {
             new_price: Some(new_price),
             new_quantity: None,
             dry_run: None,
+            ap_code: None,
+            mock: None,
         }
     }
 
@@ -231,8 +394,76 @@ impl OrderRequest {
             new_price: None,
             new_quantity: Some(new_quantity),
             dry_run: None,
+            ap_code: None,
+            mock: None,
         }
     }
+}
+
+/// One initial position in the unified mock-account model.
+///
+/// Implementations map `code` to A's `symbol` or TW's `stk_code`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MockPositionInit {
+    /// Market-specific stock code.
+    pub code: String,
+    /// Initial total quantity.
+    pub quantity: f64,
+    /// Initial tradable quantity (A-share only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_quantity: Option<f64>,
+    /// Initial average cost (`average_cost` on A, `avg_price` on TW).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_cost: Option<f64>,
+}
+
+/// Unified request for initializing a server-side mock account.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MockAccountInitRequest {
+    /// Mock-account identifier, required by TW and ignored by A-share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Initial simulated cash.
+    pub cash: f64,
+    /// Initial simulated positions.
+    #[serde(default)]
+    pub positions: Vec<MockPositionInit>,
+    /// Whether an existing account may be overwritten (A-share only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<bool>,
+}
+
+/// Unified server-side mock account.
+///
+/// A-share has one unnamed account with millisecond timestamps. TW has named,
+/// activatable accounts with ISO-8601 timestamps. The two timestamp pairs and
+/// `active` therefore remain optional instead of inventing a lossy conversion.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MockAccount {
+    /// Mock-account identifier (TW only).
+    #[serde(default)]
+    pub account: Option<String>,
+    /// Simulated available cash.
+    #[serde(default)]
+    pub cash: f64,
+    /// Normalized simulated positions.
+    #[serde(default)]
+    pub positions: Vec<MockPositionInit>,
+    /// Whether the account accepts orders (TW only).
+    #[serde(default)]
+    pub active: Option<bool>,
+    /// Creation time as ISO 8601 (TW only).
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Last update time as ISO 8601 (TW only).
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    /// Creation time as epoch milliseconds (A-share only).
+    #[serde(default)]
+    pub created_at_ms: Option<u64>,
+    /// Last update time as epoch milliseconds (A-share only).
+    #[serde(default)]
+    pub updated_at_ms: Option<u64>,
 }
 
 /// Unified cancel request.
@@ -339,8 +570,11 @@ pub struct OrderStatus {
     #[serde(default)]
     pub quantity: Option<f64>,
     /// Filled quantity.
-    #[serde(default)]
+    #[serde(default, alias = "filled_qty")]
     pub filled_quantity: Option<f64>,
+    /// Execution/fill price when the server reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_price: Option<f64>,
     /// Created time.
     #[serde(default)]
     pub created_at: Option<String>,
@@ -356,6 +590,9 @@ pub struct OrderStatus {
     /// A-share dry-run flag.
     #[serde(default)]
     pub dry_run: Option<bool>,
+    /// Whether this order used the server-side mock execution path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock: Option<bool>,
     /// TW original request payload.
     #[serde(default)]
     pub request: Option<Value>,
@@ -660,6 +897,20 @@ pub enum BrokerEvent {
         /// Server timestamp in milliseconds.
         timestamp_ms: Option<i64>,
     },
+    /// A-share `mock.account_changed`.
+    MockAccountChanged {
+        /// Raw event payload.
+        data: Value,
+        /// Server timestamp in milliseconds.
+        timestamp_ms: Option<i64>,
+    },
+    /// A-share `ws.lagged`; some broadcast events were dropped before delivery.
+    WsLagged {
+        /// Raw event payload, including `skipped`.
+        data: Value,
+        /// Server timestamp in milliseconds.
+        timestamp_ms: Option<i64>,
+    },
     /// TW `welcome`
     Welcome {
         /// Optional welcome message.
@@ -796,5 +1047,217 @@ mod tests {
             }
             _ => panic!("expected unknown"),
         }
+    }
+
+    #[test]
+    fn tw_order_request_without_mock_keeps_the_030_wire_bytes() {
+        // Regression guard: both `mock` and `ap_code` must be opt-in. Omitting
+        // them has to produce the exact 0.3.0 body, byte for byte.
+        let request = OrderRequest::new("C1", "S1", "2330", "B", 500.0, 10, "ROD", "LIMIT");
+        assert_eq!(request.mock, None);
+        assert_eq!(request.ap_code, None);
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"client_order_id":"C1","action":"new","account":"S1","stk_code":"2330","side":"B","price":500.0,"quantity":10,"time_in_force":"ROD","price_flag":"LIMIT"}"#
+        );
+    }
+
+    #[test]
+    fn with_mock_serializes_the_flag_after_the_existing_fields() {
+        let request =
+            OrderRequest::new("C1", "S1", "2330", "B", 500.0, 10, "ROD", "LIMIT").with_mock(true);
+        assert_eq!(request.mock, Some(true));
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"client_order_id":"C1","action":"new","account":"S1","stk_code":"2330","side":"B","price":500.0,"quantity":10,"time_in_force":"ROD","price_flag":"LIMIT","mock":true}"#
+        );
+    }
+
+    #[test]
+    fn with_mock_false_is_omitted_for_wire_compatibility() {
+        // Both servers default `mock` to `false`; explicit false therefore
+        // must behave like the unset builder state and add no wire field.
+        let explicit =
+            OrderRequest::new("C1", "S1", "2330", "B", 500.0, 10, "ROD", "LIMIT").with_mock(false);
+        assert_eq!(explicit.mock, None);
+        assert!(!serde_json::to_string(&explicit).unwrap().contains("mock"));
+
+        for constructor in [
+            OrderRequest::new("C1", "S1", "2330", "B", 500.0, 10, "ROD", "LIMIT"),
+            OrderRequest::a_new("C2", "512100", "buy", 3.305, 100, false),
+        ] {
+            assert_eq!(constructor.mock, None);
+            assert!(
+                !serde_json::to_string(&constructor)
+                    .unwrap()
+                    .contains("mock")
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_carries_mock_through_the_unified_request() {
+        let request = OrderRequest::a_new("C1", "512100", "buy", 3.305, 100, true).with_mock(true);
+        assert_eq!(request.mock, Some(true));
+        assert_eq!(request.symbol.as_deref(), Some("512100"));
+    }
+
+    #[test]
+    fn ap_code_serializes_to_semantic_strings() {
+        let cases = [
+            (ApCode::Regular, "REGULAR"),
+            (ApCode::OddLot, "ODD_LOT"),
+            (ApCode::IntradayOddLot, "INTRADAY_ODD_LOT"),
+            (ApCode::AfterHours, "AFTER_HOURS"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(
+                serde_json::to_string(&code).unwrap(),
+                format!(r#""{expected}""#)
+            );
+        }
+    }
+
+    #[test]
+    fn ap_code_deserializes_semantic_strings_and_legacy_numbers() {
+        let cases = [
+            (json!("REGULAR"), ApCode::Regular),
+            (json!("ODD_LOT"), ApCode::OddLot),
+            (json!("INTRADAY_ODD_LOT"), ApCode::IntradayOddLot),
+            (json!("AFTER_HOURS"), ApCode::AfterHours),
+            (json!(0), ApCode::Regular),
+            (json!(2), ApCode::OddLot),
+            (json!(4), ApCode::IntradayOddLot),
+            (json!(7), ApCode::AfterHours),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(serde_json::from_value::<ApCode>(value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn ap_code_rejects_unknown_names_and_numbers() {
+        for value in [
+            json!("AUCTION"),
+            json!(1),
+            json!(-1),
+            json!(256),
+            json!(true),
+        ] {
+            assert!(
+                serde_json::from_value::<ApCode>(value.clone()).is_err(),
+                "{value} must be rejected rather than silently becoming REGULAR"
+            );
+        }
+        for value in [-1, 1, 3, 5, 6, 8, 256] {
+            assert!(ApCode::try_from(value).is_err());
+        }
+    }
+
+    #[test]
+    fn ap_code_converts_from_legacy_numeric_values() {
+        assert_eq!(ApCode::from(0_u8), ApCode::Regular);
+        assert_eq!(ApCode::from(2_u8), ApCode::OddLot);
+        assert_eq!(ApCode::from(4_u8), ApCode::IntradayOddLot);
+        assert_eq!(ApCode::from(7_u8), ApCode::AfterHours);
+
+        assert_eq!(ApCode::try_from(0_i32).unwrap(), ApCode::Regular);
+        assert_eq!(ApCode::try_from(2_i32).unwrap(), ApCode::OddLot);
+        assert_eq!(ApCode::try_from(4_i32).unwrap(), ApCode::IntradayOddLot);
+        assert_eq!(ApCode::try_from(7_i32).unwrap(), ApCode::AfterHours);
+    }
+
+    #[test]
+    fn tw_order_request_with_ap_code_adds_only_that_field() {
+        let request = OrderRequest::new("C1", "S1", "2330", "B", 500.0, 10, "ROD", "LIMIT")
+            .with_ap_code(ApCode::OddLot);
+        assert_eq!(request.ap_code, Some(ApCode::OddLot));
+        assert_eq!(request.mock, None);
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"client_order_id":"C1","action":"new","account":"S1","stk_code":"2330","side":"B","price":500.0,"quantity":10,"time_in_force":"ROD","price_flag":"LIMIT","ap_code":"ODD_LOT"}"#
+        );
+    }
+
+    #[test]
+    fn unified_mock_init_model_holds_both_server_shapes() {
+        let request = MockAccountInitRequest {
+            account: Some("MOCK-TEST".to_owned()),
+            cash: 100_000.0,
+            positions: vec![MockPositionInit {
+                code: "2330".to_owned(),
+                quantity: 10.0,
+                available_quantity: Some(8.0),
+                average_cost: Some(500.0),
+            }],
+            reset: Some(false),
+        };
+        assert_eq!(request.account.as_deref(), Some("MOCK-TEST"));
+        assert_eq!(request.positions[0].code, "2330");
+        assert_eq!(request.positions[0].available_quantity, Some(8.0));
+        assert_eq!(request.reset, Some(false));
+    }
+
+    #[test]
+    fn unified_mock_account_represents_a_and_tw_metadata() {
+        let a = MockAccount {
+            cash: 100_000.0,
+            positions: vec![],
+            created_at_ms: Some(1),
+            updated_at_ms: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(a.account, None);
+        assert_eq!(a.active, None);
+        assert_eq!(a.created_at_ms, Some(1));
+
+        let tw = MockAccount {
+            account: Some("MOCK-TEST".to_owned()),
+            cash: 100_000.0,
+            active: Some(true),
+            created_at: Some("2026-09-14T00:00:00+00:00".to_owned()),
+            updated_at: Some("2026-09-14T00:00:01+00:00".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(tw.account.as_deref(), Some("MOCK-TEST"));
+        assert_eq!(tw.active, Some(true));
+        assert_eq!(tw.created_at_ms, None);
+    }
+
+    #[test]
+    fn order_status_parses_mock_as_a_typed_field() {
+        let status: OrderStatus = serde_json::from_value(json!({
+            "client_order_id": "M1",
+            "status": "FILLED",
+            "mock": true,
+            "future_field": 1
+        }))
+        .unwrap();
+        assert_eq!(status.mock, Some(true));
+        assert_eq!(status.extra["future_field"], 1);
+        assert!(status.extra.get("mock").is_none());
+
+        let old: OrderStatus = serde_json::from_value(json!({"status": "SUBMITTED"})).unwrap();
+        assert_eq!(old.mock, None);
+    }
+
+    #[test]
+    fn order_status_new_optional_fields_do_not_change_legacy_json_when_absent() {
+        let status = OrderStatus::default();
+        let json = serde_json::to_value(status).unwrap();
+        assert!(json.get("mock").is_none());
+        assert!(json.get("fill_price").is_none());
+    }
+
+    #[test]
+    fn order_status_serializes_new_fields_when_present() {
+        let status = OrderStatus {
+            mock: Some(false),
+            fill_price: Some(101.0),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["mock"], false);
+        assert_eq!(json["fill_price"], 101.0);
     }
 }

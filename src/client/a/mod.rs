@@ -140,7 +140,15 @@ impl AClient {
     }
 
     /// Calls `POST /v1/orders`.
+    ///
+    /// `mock` and `dry_run` are mutually exclusive; the server rejects that
+    /// combination with `400`, so it is rejected here without a round trip.
     pub async fn submit_order(&self, request: &OrderRequest) -> Result<Order> {
+        if request.mock && request.dry_run {
+            return Err(crate::Error::InvalidRequest(
+                "mock 与 dry_run 不能同时启用".to_owned(),
+            ));
+        }
         self.a_post("/v1/orders", request).await
     }
 
@@ -183,6 +191,26 @@ impl AClient {
     pub async fn resume(&self) -> Result<Value> {
         self.a_post("/v1/control/resume", &serde_json::json!({}))
             .await
+    }
+
+    // ------------------------------------------------------------------
+    // Mock trading account
+    // ------------------------------------------------------------------
+
+    /// Calls `GET /v1/mock/account` and returns the server-side mock account.
+    ///
+    /// The mock account is isolated from the real 同花顺 account. An
+    /// uninitialized account is reported as [`crate::Error::Api`].
+    pub async fn mock_account(&self) -> Result<MockAccount> {
+        self.a_get("/v1/mock/account").await
+    }
+
+    /// Calls `POST /v1/mock/init_account` and returns the stored mock account.
+    ///
+    /// Re-initializing an existing account requires `reset = true`; otherwise
+    /// the server answers `409` as [`crate::Error::Api`].
+    pub async fn init_mock_account(&self, request: &InitMockAccountRequest) -> Result<MockAccount> {
+        self.a_post("/v1/mock/init_account", request).await
     }
 
     // ------------------------------------------------------------------
@@ -259,6 +287,31 @@ impl crate::client::broker::BrokerClient for AClient {
         Ok(cached.data.into_iter().map(Into::into).collect())
     }
 
+    async fn mock_account(&self) -> Result<crate::types::MockAccount> {
+        Ok(AClient::mock_account(self).await?.into())
+    }
+
+    async fn init_mock_account(
+        &self,
+        request: &crate::types::MockAccountInitRequest,
+    ) -> Result<crate::types::MockAccount> {
+        let request = InitMockAccountRequest {
+            cash: request.cash,
+            positions: request
+                .positions
+                .iter()
+                .map(|position| MockPosition {
+                    symbol: position.code.clone(),
+                    quantity: position.quantity,
+                    available_quantity: position.available_quantity.unwrap_or(position.quantity),
+                    average_cost: position.average_cost.unwrap_or_default(),
+                })
+                .collect(),
+            reset: request.reset.unwrap_or(false),
+        };
+        Ok(AClient::init_mock_account(self, &request).await?.into())
+    }
+
     async fn submit_order(
         &self,
         request: &crate::types::OrderRequest,
@@ -280,6 +333,7 @@ impl crate::client::broker::BrokerClient for AClient {
             price,
             quantity,
             dry_run: request.dry_run.unwrap_or(false),
+            mock: request.mock.unwrap_or(false),
         };
         let order = self.submit_order(&a_request).await?;
         Ok(order.into())
@@ -337,8 +391,43 @@ impl From<Position> for crate::types::Position {
     }
 }
 
+impl From<MockAccount> for crate::types::MockAccount {
+    fn from(account: MockAccount) -> Self {
+        Self {
+            account: None,
+            cash: account.cash,
+            positions: account
+                .positions
+                .into_iter()
+                .map(|position| crate::types::MockPositionInit {
+                    code: position.symbol,
+                    quantity: position.quantity,
+                    available_quantity: Some(position.available_quantity),
+                    average_cost: Some(position.average_cost),
+                })
+                .collect(),
+            active: None,
+            created_at: None,
+            updated_at: None,
+            created_at_ms: Some(account.created_at_ms),
+            updated_at_ms: Some(account.updated_at_ms),
+        }
+    }
+}
+
 impl From<Order> for crate::types::OrderStatus {
     fn from(order: Order) -> Self {
+        // `#[serde(flatten)]` only captures fields the `Order` struct does not
+        // declare, so execution details without unified fields are folded back
+        // into `extra` to keep the unified view lossless.
+        let mut extra = match order.extra {
+            Value::Object(map) => Value::Object(map),
+            _ => Value::Object(serde_json::Map::new()),
+        };
+        if let Some(filled_at_ms) = order.filled_at_ms {
+            extra["filled_at_ms"] = Value::from(filled_at_ms);
+        }
+
         Self {
             client_order_id: order.client_order_id,
             status: order.status,
@@ -349,12 +438,14 @@ impl From<Order> for crate::types::OrderStatus {
             price: order.price,
             quantity: order.quantity,
             filled_quantity: order.filled_quantity,
+            fill_price: order.fill_price,
             name: order.name,
             message: order.message,
             dry_run: order.dry_run,
+            mock: order.mock,
             created_at: order.created_at,
             updated_at: order.updated_at,
-            extra: order.extra,
+            extra,
             ..Default::default()
         }
     }
@@ -771,5 +862,227 @@ mod tests {
         );
         assert!(a.panic(None).await.is_err());
         assert!(a.resume().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn submit_order_rejects_mock_with_dry_run_before_sending() {
+        let server = MockServer::start().await;
+        let request = OrderRequest {
+            dry_run: true,
+            ..OrderRequest::mock("c1", "512100", "buy", 3.305, 100)
+        };
+
+        let err = client(&server).submit_order(&request).await.unwrap_err();
+        match err {
+            crate::error::Error::InvalidRequest(message) => {
+                assert_eq!(message, "mock 与 dry_run 不能同时启用");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "conflicting request must never reach the server"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_order_sends_mock_flag_and_parses_fill_receipt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orders"))
+            .and(body_json(json!({
+                "client_order_id": "c1",
+                "symbol": "512100",
+                "side": "buy",
+                "price": 3.305,
+                "quantity": 100,
+                "dry_run": false,
+                "mock": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "client_order_id": "c1",
+                "status": "Filled",
+                "symbol": "512100",
+                "side": "buy",
+                "price": 3.305,
+                "quantity": 100.0,
+                "dry_run": false,
+                "mock": true,
+                "contract_id": "MOCK-1787910698040-c1",
+                "fill_price": 3.312,
+                "filled_quantity": 100.0,
+                "filled_at_ms": 1787910698040_u64,
+                "message": "mock 全量成交"
+            })))
+            .mount(&server)
+            .await;
+
+        let order = client(&server)
+            .submit_order(&OrderRequest::mock("c1", "512100", "buy", 3.305, 100))
+            .await
+            .unwrap();
+        assert_eq!(order.status.as_deref(), Some("Filled"));
+        assert_eq!(order.mock, Some(true));
+        assert_eq!(order.fill_price, Some(3.312));
+        assert_eq!(order.filled_quantity, Some(100.0));
+        assert_eq!(order.filled_at_ms, Some(1787910698040));
+    }
+
+    #[tokio::test]
+    async fn mock_account_get_hits_path_and_parses_typed_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mock/account"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "cash": 100000.0,
+                "positions": [{
+                    "symbol": "518850",
+                    "quantity": 1000.0,
+                    "available_quantity": 900.0,
+                    "average_cost": 9.0
+                }],
+                "created_at_ms": 1787910698040_u64,
+                "updated_at_ms": 1787910698041_u64
+            })))
+            .mount(&server)
+            .await;
+
+        let account = client(&server).mock_account().await.unwrap();
+        assert_eq!(account.cash, 100000.0);
+        assert_eq!(account.positions[0].symbol, "518850");
+        assert_eq!(account.positions[0].available_quantity, 900.0);
+        assert_eq!(account.created_at_ms, 1787910698040);
+    }
+
+    #[tokio::test]
+    async fn mock_account_maps_both_error_body_shapes_to_api_error() {
+        // `/v1` rewrites `{"error": msg}` into the `{code,message,detail}`
+        // envelope (stock_broker_a_server `v1_error_middleware`). Both shapes
+        // must surface as an `Api` error rather than an opaque `Http` one.
+        for body in [
+            json!({
+                "code": "error",
+                "message": "mock 账户尚未初始化",
+                "detail": {}
+            }),
+            json!({"error": "mock 账户尚未初始化"}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/mock/account"))
+                .respond_with(ResponseTemplate::new(404).set_body_json(body.clone()))
+                .mount(&server)
+                .await;
+
+            match client(&server).mock_account().await.unwrap_err() {
+                crate::error::Error::Api { message, .. } => {
+                    assert_eq!(message, "mock 账户尚未初始化", "for body {body}");
+                }
+                other => panic!("expected Api error for {body}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn init_mock_account_posts_documented_body_and_parses_account() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mock/init_account"))
+            .and(body_json(json!({
+                "cash": 100000.0,
+                "positions": [{
+                    "symbol": "518850",
+                    "quantity": 1000.0,
+                    "available_quantity": 1000.0,
+                    "average_cost": 9.0
+                }],
+                "reset": false
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "cash": 100000.0,
+                "positions": [{
+                    "symbol": "518850",
+                    "quantity": 1000.0,
+                    "available_quantity": 1000.0,
+                    "average_cost": 9.0
+                }],
+                "created_at_ms": 1787910698040_u64,
+                "updated_at_ms": 1787910698040_u64
+            })))
+            .mount(&server)
+            .await;
+
+        let request = InitMockAccountRequest {
+            cash: 100000.0,
+            positions: vec![MockPosition {
+                symbol: "518850".to_owned(),
+                quantity: 1000.0,
+                available_quantity: 1000.0,
+                average_cost: 9.0,
+            }],
+            reset: false,
+        };
+        let account = client(&server).init_mock_account(&request).await.unwrap();
+        assert_eq!(account.cash, 100000.0);
+        assert_eq!(account.positions[0].available_quantity, 1000.0);
+    }
+
+    #[tokio::test]
+    async fn init_mock_account_maps_conflict_to_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mock/init_account"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "code": "error",
+                "message": "mock 账户已初始化；如需覆盖请设置 reset=true",
+                "detail": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let request = InitMockAccountRequest {
+            cash: 100000.0,
+            ..Default::default()
+        };
+        match client(&server)
+            .init_mock_account(&request)
+            .await
+            .unwrap_err()
+        {
+            crate::error::Error::Api { code, message, .. } => {
+                assert_eq!(code, "error");
+                assert!(message.contains("reset=true"));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_mock_account_maps_bad_request_to_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mock/init_account"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "code": "error",
+                "message": "mock 初始资金必须是有限非负数",
+                "detail": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let request = InitMockAccountRequest {
+            cash: -1.0,
+            ..Default::default()
+        };
+        match client(&server)
+            .init_mock_account(&request)
+            .await
+            .unwrap_err()
+        {
+            crate::error::Error::Api { message, .. } => {
+                assert_eq!(message, "mock 初始资金必须是有限非负数");
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 }

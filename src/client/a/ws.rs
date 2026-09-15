@@ -220,6 +220,8 @@ mod tests {
                 "order.manual_review",
                 "risk.panic",
                 "health.changed",
+                "mock.account_changed",
+                "ws.lagged",
                 "future.event",
             ] {
                 ws.send(Message::Text(
@@ -258,6 +260,8 @@ mod tests {
                 AEvent::OrderManualReview { .. } => seen.push("order.manual_review".to_owned()),
                 AEvent::RiskPanic { .. } => seen.push("risk.panic".to_owned()),
                 AEvent::HealthChanged { .. } => seen.push("health.changed".to_owned()),
+                AEvent::MockAccountChanged { .. } => seen.push("mock.account_changed".to_owned()),
+                AEvent::WsLagged { .. } => seen.push("ws.lagged".to_owned()),
                 AEvent::Unknown { .. } => seen.push("unknown".to_owned()),
             }
         }
@@ -274,6 +278,8 @@ mod tests {
                 "order.manual_review",
                 "risk.panic",
                 "health.changed",
+                "mock.account_changed",
+                "ws.lagged",
                 "future.event"
             ]
         );
@@ -347,6 +353,20 @@ mod tests {
             ))
             .await
             .unwrap();
+            ws.send(Message::Text(
+                json!({"type": "mock.account_changed", "timestamp_ms": 43, "data": {"cash": 100.0}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            ws.send(Message::Text(
+                json!({"type": "ws.lagged", "timestamp_ms": 44, "data": {"skipped": 3}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
 
@@ -363,6 +383,30 @@ mod tests {
             .expect("timed out waiting for unified A event")
             .unwrap();
         assert!(matches!(event, BrokerEvent::OrderUpdated { .. }));
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("timed out waiting for unified mock account event")
+            .unwrap();
+        assert!(matches!(
+            event,
+            BrokerEvent::MockAccountChanged {
+                data,
+                timestamp_ms: Some(43)
+            } if data["cash"] == 100.0
+        ));
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("timed out waiting for unified lag event")
+            .unwrap();
+        assert!(matches!(
+            event,
+            BrokerEvent::WsLagged {
+                data,
+                timestamp_ms: Some(44)
+            } if data["skipped"] == 3
+        ));
 
         server.await.unwrap();
     }

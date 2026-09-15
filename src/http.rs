@@ -63,6 +63,16 @@ impl HttpClient {
             .await
     }
 
+    /// Sends a DELETE request and decodes the JSON response.
+    ///
+    /// DELETE is a write, so it is never retried.
+    pub async fn delete_json<T>(&self, path: &str) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        self.send_json(Method::DELETE, path, &[], None, None).await
+    }
+
     /// Sends a GET request and returns the raw response body as text.
     pub async fn get_text(&self, path: &str) -> Result<String> {
         self.send_raw(Method::GET, path, &[], None).await
@@ -369,6 +379,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_requests_retry_on_bare_api_error_and_keep_status() {
+        let server = MockServer::start().await;
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        Mock::given(method("GET"))
+            .and(path("/bare-retry"))
+            .respond_with(move |_req: &wiremock::Request| {
+                let n = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(503).set_body_json(json!({"error": "busy"}))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"ok": true}))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let client = HttpClient::new(ClientConfig::new(server.uri()).retry(1));
+        let value: serde_json::Value = client.get_json("/bare-retry").await.unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn invalid_url_maps_to_error() {
         let config = ClientConfig::new("not a url");
         let client = HttpClient::new(config);
@@ -454,7 +489,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            crate::error::Error::Api { code, message, detail }
+            crate::error::Error::Api { code, message, detail, .. }
                 if code == "ORDER_NOT_FOUND" && message == "missing order" && detail == json!({"id": 1})
         ));
     }
@@ -479,8 +514,54 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            crate::error::Error::Api { code, message, detail }
+            crate::error::Error::Api { code, message, detail, .. }
                 if code == "INVALID_REQUEST" && message == "bad request" && detail == json!({"field": "symbol"})
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_json_sends_delete_and_parses_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/mock/accounts/MOCK-TEST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": "ok",
+                "data": {"active": false}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = HttpClient::new(ClientConfig::new(server.uri()));
+        let value: serde_json::Value = client
+            .delete_json("/api/v1/mock/accounts/MOCK-TEST")
+            .await
+            .unwrap();
+        assert_eq!(value["data"]["active"], false);
+    }
+
+    #[tokio::test]
+    async fn delete_requests_are_not_retried_on_5xx() {
+        // DELETE is a write: a 5xx must surface immediately, never be replayed.
+        let server = MockServer::start().await;
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        Mock::given(method("DELETE"))
+            .and(path("/x"))
+            .respond_with(move |_req: &wiremock::Request| {
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(503).set_body_string("busy")
+            })
+            .mount(&server)
+            .await;
+
+        let client = HttpClient::new(ClientConfig::new(server.uri()).retry(3));
+        let err = client
+            .delete_json::<serde_json::Value>("/x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Http { status: 503, .. }));
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

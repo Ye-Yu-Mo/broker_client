@@ -25,6 +25,7 @@ pub use types::*;
 pub struct TwClient {
     http: HttpClient,
     subscriptions: Arc<Mutex<Vec<QuoteSubscription>>>,
+    selected_mock_account: Arc<Mutex<Option<String>>>,
 }
 
 impl TwClient {
@@ -33,6 +34,7 @@ impl TwClient {
         Self {
             http: HttpClient::new(config),
             subscriptions: Arc::new(Mutex::new(Vec::new())),
+            selected_mock_account: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -370,7 +372,15 @@ impl TwClient {
     /// [`TwClient::cancel_order`], [`TwClient::replace_price`] and
     /// [`TwClient::replace_quantity`] build safe requests.
     pub async fn submit_stock_order(&self, request: &OrderRequest) -> Result<OrderStatus> {
-        self.tw_post("/api/v1/orders/stock", request).await
+        let mut status: OrderStatus = self.tw_post("/api/v1/orders/stock", request).await?;
+        if let Some(data) = status.data.clone() {
+            // The submit endpoint returns a status object whose execution
+            // details are nested under `data`, unlike the older flat status
+            // shape. Reuse the same promotion path as WS and query responses.
+            let raw = serde_json::json!({"data": data});
+            crate::client::tw::types::promote_mock_execution_fields(&mut status, &raw);
+        }
+        Ok(status)
     }
 
     /// Cancels an order.
@@ -478,6 +488,46 @@ impl TwClient {
     }
 
     // ------------------------------------------------------------------
+    // Mock trading account
+    // ------------------------------------------------------------------
+
+    /// Calls `POST /api/v1/mock/accounts/init`.
+    ///
+    /// Simulated accounts live in the server's isolated `MOCK-` namespace and
+    /// never reach 元大. An existing account with a different cash/position
+    /// snapshot is refused with the documented `400` as [`crate::Error::Api`].
+    pub async fn init_mock_account(&self, request: &MockAccountInitRequest) -> Result<MockAccount> {
+        validate_mock_account(&request.account)?;
+        let account = self.tw_post("/api/v1/mock/accounts/init", request).await?;
+        *self
+            .selected_mock_account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.account.clone());
+        Ok(account)
+    }
+
+    /// Calls `GET /api/v1/mock/accounts/{account}`.
+    ///
+    /// An account that was never initialized is reported as
+    /// [`crate::Error::Api`] with code `MOCK_ACCOUNT_NOT_FOUND`.
+    pub async fn mock_account(&self, account: &str) -> Result<MockAccount> {
+        validate_mock_account(account)?;
+        let path = mock_account_path(account);
+        self.tw_get(&path, &[]).await
+    }
+
+    /// Calls `DELETE /api/v1/mock/accounts/{account}`.
+    ///
+    /// The account is deactivated rather than deleted: its ledger history is
+    /// kept, but new orders are refused with `MOCK_ACCOUNT_INACTIVE`.
+    pub async fn deactivate_mock_account(&self, account: &str) -> Result<MockAccount> {
+        validate_mock_account(account)?;
+        let path = mock_account_path(account);
+        let envelope: TwEnvelope<MockAccount> = self.http.delete_json(&path).await?;
+        envelope.into_data()
+    }
+
+    // ------------------------------------------------------------------
     // Recovery
     // ------------------------------------------------------------------
 
@@ -538,6 +588,133 @@ fn unified_to_tw_request(
     Ok(tw)
 }
 
+fn mock_account_path(account: &str) -> String {
+    format!("/api/v1/mock/accounts/{}", encode_path_segment(account))
+}
+
+/// Rejects an account name the server's `MOCK-` namespace can never accept.
+fn validate_mock_account(account: &str) -> Result<()> {
+    if !types::is_mock_account(account) {
+        return Err(crate::Error::InvalidRequest(format!(
+            "mock account {account:?} must match ^MOCK-[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        )));
+    }
+    if !(6..=64).contains(&account.len()) {
+        return Err(crate::Error::InvalidRequest(format!(
+            "mock account {account:?} length must be between 6 and 64 characters"
+        )));
+    }
+    Ok(())
+}
+
+// `i64::MAX` is not exactly representable as f64; it rounds to 2^63.
+// Use the exact exclusive upper bound instead of `i64::MAX as f64`, which
+// would accept that rounded value before a saturating float-to-int cast.
+const I64_EXCLUSIVE_UPPER_BOUND_F64: f64 = 9_223_372_036_854_775_808.0;
+
+fn unified_to_tw_mock_init(
+    request: &crate::types::MockAccountInitRequest,
+) -> Result<MockAccountInitRequest> {
+    let account = request.account.as_deref().ok_or_else(|| {
+        crate::Error::InvalidRequest("TW mock account init is missing account".to_owned())
+    })?;
+    validate_mock_account(account)?;
+    if request.reset == Some(true) {
+        return Err(crate::Error::InvalidRequest(
+            "TW mock accounts do not support reset".to_owned(),
+        ));
+    }
+
+    let positions = request
+        .positions
+        .iter()
+        .map(|position| {
+            if let Some(available) = position.available_quantity
+                && (!available.is_finite()
+                    || (available - position.quantity).abs() > f64::EPSILON)
+            {
+                return Err(crate::Error::InvalidRequest(format!(
+                    "TW mock position {} cannot represent available_quantity different from quantity",
+                    position.code
+                )));
+            }
+            if !position.quantity.is_finite()
+                || position.quantity < 0.0
+                || position.quantity.fract() != 0.0
+                || position.quantity >= I64_EXCLUSIVE_UPPER_BOUND_F64
+            {
+                return Err(crate::Error::InvalidRequest(format!(
+                    "TW mock position {} quantity must be a non-negative integer",
+                    position.code
+                )));
+            }
+            Ok(MockPositionInit {
+                stk_code: position.code.clone(),
+                quantity: position.quantity as i64,
+                avg_price: position.average_cost,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(MockAccountInitRequest {
+        account: account.to_owned(),
+        cash: request.cash,
+        positions,
+    })
+}
+
+fn tw_mock_account_to_unified(account: MockAccount) -> Result<crate::types::MockAccount> {
+    let positions = match &account.positions {
+        Value::Null => Vec::new(),
+        Value::Object(entries) => entries
+            .iter()
+            .map(|(code, value)| {
+                let fields = value.as_object().ok_or_else(|| crate::Error::Decode {
+                    body: value.to_string(),
+                    source: format!("TW mock position {code} is not an object"),
+                })?;
+                let quantity = fields
+                    .get("quantity")
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| crate::Error::Decode {
+                        body: value.to_string(),
+                        source: format!("TW mock position {code} is missing numeric quantity"),
+                    })?;
+                let average_cost = match fields.get("avg_price") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(value.as_f64().ok_or_else(|| crate::Error::Decode {
+                        body: value.to_string(),
+                        source: format!("TW mock position {code} has non-numeric avg_price"),
+                    })?),
+                };
+                Ok(crate::types::MockPositionInit {
+                    code: code.clone(),
+                    quantity,
+                    available_quantity: None,
+                    average_cost,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        value => {
+            return Err(crate::Error::Decode {
+                body: value.to_string(),
+                source: "TW mock account positions is not an object".to_owned(),
+            });
+        }
+    };
+
+    Ok(crate::types::MockAccount {
+        account: (!account.account.is_empty()).then_some(account.account),
+        cash: account.cash,
+        positions,
+        active: Some(account.active),
+        created_at: (!account.created_at.is_empty()).then_some(account.created_at),
+        updated_at: (!account.updated_at.is_empty()).then_some(account.updated_at),
+        created_at_ms: None,
+        updated_at_ms: None,
+    })
+}
+
 #[async_trait::async_trait]
 impl crate::client::broker::BrokerClient for TwClient {
     fn config(&self) -> &ClientConfig {
@@ -582,6 +759,30 @@ impl crate::client::broker::BrokerClient for TwClient {
 
     async fn positions(&self) -> Result<Vec<crate::types::Position>> {
         self.positions(None).await
+    }
+
+    async fn mock_account(&self) -> Result<crate::types::MockAccount> {
+        let account = self
+            .selected_mock_account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                crate::Error::InvalidRequest(
+                    "TW mock account is not selected; initialize one first".to_owned(),
+                )
+            })?;
+        let account = TwClient::mock_account(self, &account).await?;
+        tw_mock_account_to_unified(account)
+    }
+
+    async fn init_mock_account(
+        &self,
+        request: &crate::types::MockAccountInitRequest,
+    ) -> Result<crate::types::MockAccount> {
+        let request = unified_to_tw_mock_init(request)?;
+        let account = TwClient::init_mock_account(self, &request).await?;
+        tw_mock_account_to_unified(account)
     }
 
     async fn submit_order(
@@ -648,7 +849,8 @@ impl crate::client::broker::BrokerClient for TwClient {
 impl From<OrderRecord> for crate::types::OrderStatus {
     fn from(record: OrderRecord) -> Self {
         let symbol = record.stk_code.clone();
-        Self {
+        let extra = record.extra;
+        let mut status = Self {
             client_order_id: record.client_order_id,
             status: record.status,
             order_no: record.order_no,
@@ -662,9 +864,18 @@ impl From<OrderRecord> for crate::types::OrderStatus {
             filled_quantity: record.filled_quantity,
             created_at: record.created_at,
             updated_at: record.updated_at,
-            extra: record.extra,
+            mock: None,
+            fill_price: None,
+            extra,
             ..Default::default()
+        };
+
+        let raw = status.extra.clone();
+        promote_mock_execution_fields(&mut status, &raw);
+        if let Value::Object(fields) = &mut status.extra {
+            fields.remove("mock");
         }
+        status
     }
 }
 
@@ -680,6 +891,42 @@ mod tests {
     async fn default_base_url_matches_docs() {
         let client = TwClient::default();
         assert_eq!(client.config().base_url, "http://127.0.0.1:8000");
+    }
+
+    #[test]
+    fn order_record_conversion_promotes_mock_out_of_extra() {
+        let record: OrderRecord = serde_json::from_value(json!({
+            "client_order_id": "M1",
+            "status": "FILLED",
+            "mock": true,
+            "future_field": 1
+        }))
+        .unwrap();
+        let status: crate::types::OrderStatus = record.into();
+        assert_eq!(status.mock, Some(true));
+        assert!(status.extra.get("mock").is_none());
+        assert_eq!(status.extra["future_field"], 1);
+    }
+
+    #[test]
+    fn order_record_conversion_promotes_nested_mock_execution_fields() {
+        let record: OrderRecord = serde_json::from_value(json!({
+            "client_order_id": "M2",
+            "status": "FILLED",
+            "data": {
+                "mock": true,
+                "fill_price": 101.0,
+                "filled_qty": 10,
+                "future_field": "preserved"
+            }
+        }))
+        .unwrap();
+        let status: crate::types::OrderStatus = record.into();
+        assert_eq!(status.mock, Some(true));
+        assert_eq!(status.fill_price, Some(101.0));
+        assert_eq!(status.filled_quantity, Some(10.0));
+        assert_eq!(status.extra["data"]["future_field"], "preserved");
+        assert!(status.extra.get("mock").is_none());
     }
 
     #[tokio::test]
@@ -1460,5 +1707,412 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn submit_stock_order_with_mock_sends_the_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders/stock"))
+            .and(body_json(json!({
+                "client_order_id": "C001",
+                "action": "new",
+                "account": "MOCK-TEST",
+                "stk_code": "2330",
+                "side": "B",
+                "price": 500.0,
+                "quantity": 10,
+                "time_in_force": "ROD",
+                "price_flag": "LIMIT",
+                "mock": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {"client_order_id": "C001", "status": "FILLED"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let request =
+            OrderRequest::new("C001", "MOCK-TEST", "2330", "B", 500.0, 10, "ROD", "LIMIT")
+                .with_mock(true);
+        let status = client.submit_stock_order(&request).await.unwrap();
+        assert_eq!(status.status.as_deref(), Some("FILLED"));
+    }
+
+    #[tokio::test]
+    async fn submit_stock_order_with_ap_code_sends_semantic_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders/stock"))
+            .and(body_json(json!({
+                "client_order_id": "C-ODD",
+                "action": "new",
+                "account": "S1",
+                "stk_code": "2330",
+                "side": "B",
+                "price": 500.0,
+                "quantity": 1,
+                "time_in_force": "ROD",
+                "price_flag": "LIMIT",
+                "ap_code": "ODD_LOT"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {"client_order_id": "C-ODD", "status": "SUBMITTED"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let request = OrderRequest::new("C-ODD", "S1", "2330", "B", 500.0, 1, "ROD", "LIMIT")
+            .with_ap_code(ApCode::OddLot);
+        let status = client.submit_stock_order(&request).await.unwrap();
+        assert_eq!(status.status.as_deref(), Some("SUBMITTED"));
+    }
+
+    #[tokio::test]
+    async fn submit_stock_order_promotes_nested_mock_execution_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders/stock"))
+            .and(body_json(json!({
+                "client_order_id": "M1",
+                "action": "new",
+                "account": "MOCK-TEST",
+                "stk_code": "2330",
+                "side": "B",
+                "price": 100.0,
+                "quantity": 10,
+                "time_in_force": "ROD",
+                "price_flag": "LIMIT",
+                "mock": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": "ok",
+                "data": {
+                    "client_order_id": "M1",
+                    "status": "FILLED",
+                    "data": {
+                        "mock": true,
+                        "fill_price": 101.0,
+                        "filled_qty": 10
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let request = OrderRequest::new("M1", "MOCK-TEST", "2330", "B", 100.0, 10, "ROD", "LIMIT")
+            .with_mock(true);
+        let status = client.submit_stock_order(&request).await.unwrap();
+        assert_eq!(status.mock, Some(true));
+        assert_eq!(status.fill_price, Some(101.0));
+        assert_eq!(status.filled_quantity, Some(10.0));
+    }
+
+    #[tokio::test]
+    async fn init_mock_account_posts_documented_body_and_parses_account() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/mock/accounts/init"))
+            .and(body_json(json!({
+                "account": "MOCK-TEST",
+                "cash": 100000.0,
+                "positions": [{"stk_code": "2330", "quantity": 1000, "avg_price": 99.5}]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {
+                    "account": "MOCK-TEST",
+                    "cash": 100000.0,
+                    "positions": {"2330": {"quantity": 1000, "avg_price": 99.5}},
+                    "active": true,
+                    "created_at": "2026-09-12T04:31:38.040000+00:00",
+                    "updated_at": "2026-09-12T04:31:38.040000+00:00"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let request = MockAccountInitRequest {
+            account: "MOCK-TEST".to_owned(),
+            cash: 100000.0,
+            positions: vec![MockPositionInit {
+                stk_code: "2330".to_owned(),
+                quantity: 1000,
+                avg_price: Some(99.5),
+            }],
+        };
+        let account = client.init_mock_account(&request).await.unwrap();
+        assert_eq!(account.account, "MOCK-TEST");
+        assert_eq!(account.cash, 100000.0);
+        assert!(account.active);
+        assert_eq!(account.positions["2330"]["quantity"], 1000);
+    }
+
+    #[tokio::test]
+    async fn mock_account_gets_the_encoded_path_and_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mock/accounts/MOCK%2DTEST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {
+                    "account": "MOCK-TEST",
+                    "cash": 90000.0,
+                    "positions": {},
+                    "active": true,
+                    "created_at": "2026-09-12T04:31:38.040000+00:00",
+                    "updated_at": "2026-09-12T05:00:00.000000+00:00"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let account = client.mock_account("MOCK-TEST").await.unwrap();
+        assert_eq!(account.cash, 90000.0);
+
+        // The account segment is percent-encoded like every other path
+        // segment; `_`, `.` and `-` are all in the allowed namespace but are
+        // still encoded.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mock/accounts/MOCK%2DA%2EB%5FC"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {"account": "MOCK-A.B_C", "cash": 1.0, "active": true}
+            })))
+            .mount(&server)
+            .await;
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        assert_eq!(
+            client.mock_account("MOCK-A.B_C").await.unwrap().account,
+            "MOCK-A.B_C"
+        );
+    }
+
+    #[tokio::test]
+    async fn deactivate_mock_account_sends_delete_and_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/mock/accounts/MOCK%2DTEST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {
+                    "account": "MOCK-TEST",
+                    "cash": 90000.0,
+                    "positions": {},
+                    "active": false,
+                    "created_at": "2026-09-12T04:31:38.040000+00:00",
+                    "updated_at": "2026-09-12T05:00:00.000000+00:00"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let account = client.deactivate_mock_account("MOCK-TEST").await.unwrap();
+        assert!(!account.active);
+        assert_eq!(account.account, "MOCK-TEST");
+    }
+
+    #[test]
+    fn unified_mock_init_rejects_floating_point_i64_overflow_boundary() {
+        let valid = crate::types::MockAccountInitRequest {
+            account: Some("MOCK-TEST".to_owned()),
+            cash: 1.0,
+            positions: vec![crate::types::MockPositionInit {
+                code: "2330".to_owned(),
+                quantity: 2_f64.powi(62),
+                available_quantity: None,
+                average_cost: None,
+            }],
+            reset: None,
+        };
+        assert!(unified_to_tw_mock_init(&valid).is_ok());
+
+        // `i64::MAX as f64` rounds to 2^63, so comparing against that cast
+        // accepts a value which cannot be represented by an i64.
+        let rounded_i64_max = i64::MAX as f64;
+        assert_eq!(rounded_i64_max, 2_f64.powi(63));
+        let overflow = crate::types::MockAccountInitRequest {
+            account: Some("MOCK-TEST".to_owned()),
+            cash: 1.0,
+            positions: vec![crate::types::MockPositionInit {
+                code: "2330".to_owned(),
+                quantity: rounded_i64_max,
+                available_quantity: None,
+                average_cost: None,
+            }],
+            reset: None,
+        };
+        assert!(unified_to_tw_mock_init(&overflow).is_err());
+    }
+
+    #[test]
+    fn mock_account_validator_matches_server_length_bounds() {
+        assert!(validate_mock_account("MOCK-A").is_ok());
+        let max = format!("MOCK-{}", "A".repeat(59));
+        assert_eq!(max.len(), 64);
+        assert!(validate_mock_account(&max).is_ok());
+
+        let too_long = format!("MOCK-{}", "A".repeat(60));
+        assert_eq!(too_long.len(), 65);
+        assert!(validate_mock_account(&too_long).is_err());
+        assert!(validate_mock_account("MOCK-").is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_account_methods_reject_a_non_mock_namespace_without_sending() {
+        let server = MockServer::start().await;
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+
+        let request = MockAccountInitRequest {
+            account: "S98875005091".to_owned(),
+            cash: 1.0,
+            positions: Vec::new(),
+        };
+        let errors = [
+            client.init_mock_account(&request).await.unwrap_err(),
+            client.mock_account("S98875005091").await.unwrap_err(),
+            client
+                .deactivate_mock_account("S98875005091")
+                .await
+                .unwrap_err(),
+        ];
+        for err in errors {
+            match err {
+                crate::Error::InvalidRequest(message) => {
+                    assert!(message.contains("MOCK-"), "unexpected message: {message}");
+                }
+                other => panic!("expected InvalidRequest, got {other:?}"),
+            }
+        }
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "invalid names must never reach the server"
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_mock_account_requires_a_successful_init_first() {
+        use crate::client::broker::BrokerClient;
+
+        let server = MockServer::start().await;
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        match BrokerClient::mock_account(&client).await.unwrap_err() {
+            crate::Error::InvalidRequest(message) => {
+                assert_eq!(
+                    message,
+                    "TW mock account is not selected; initialize one first"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn unified_mock_init_rejects_unrepresentable_tw_fields() {
+        let missing_account = crate::types::MockAccountInitRequest {
+            cash: 1.0,
+            ..Default::default()
+        };
+        assert!(unified_to_tw_mock_init(&missing_account).is_err());
+
+        let reset = crate::types::MockAccountInitRequest {
+            account: Some("MOCK-TEST".to_owned()),
+            cash: 1.0,
+            reset: Some(true),
+            ..Default::default()
+        };
+        assert!(unified_to_tw_mock_init(&reset).is_err());
+
+        for (quantity, available) in [(1.5, None), (2.0, Some(1.0)), (2.0, Some(f64::NAN))] {
+            let request = crate::types::MockAccountInitRequest {
+                account: Some("MOCK-TEST".to_owned()),
+                cash: 1.0,
+                positions: vec![crate::types::MockPositionInit {
+                    code: "2330".to_owned(),
+                    quantity,
+                    available_quantity: available,
+                    average_cost: None,
+                }],
+                reset: None,
+            };
+            assert!(unified_to_tw_mock_init(&request).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_account_methods_map_tw_error_envelopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mock/accounts/MOCK%2DTEST"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "detail": {
+                    "code": "MOCK_ACCOUNT_NOT_FOUND",
+                    "message": "mock account not found",
+                    "detail": {"account": "MOCK-TEST"}
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        match client.mock_account("MOCK-TEST").await.unwrap_err() {
+            crate::Error::Api { code, .. } => assert_eq!(code, "MOCK_ACCOUNT_NOT_FOUND"),
+            other => panic!("expected Api error, got {other:?}"),
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/mock/accounts/init"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "detail": {
+                    "code": "INVALID_MOCK_VALUE",
+                    "message": "cash must be finite and non-negative",
+                    "detail": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let request = MockAccountInitRequest {
+            account: "MOCK-TEST".to_owned(),
+            cash: -1.0,
+            positions: Vec::new(),
+        };
+        match client.init_mock_account(&request).await.unwrap_err() {
+            crate::Error::Api { code, .. } => assert_eq!(code, "INVALID_MOCK_VALUE"),
+            other => panic!("expected Api error, got {other:?}"),
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/mock/accounts/MOCK%2DTEST"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "detail": {
+                    "code": "MOCK_ACCOUNT_NOT_FOUND",
+                    "message": "mock account not found: MOCK-TEST",
+                    "detail": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        match client
+            .deactivate_mock_account("MOCK-TEST")
+            .await
+            .unwrap_err()
+        {
+            crate::Error::Api { code, .. } => assert_eq!(code, "MOCK_ACCOUNT_NOT_FOUND"),
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 }

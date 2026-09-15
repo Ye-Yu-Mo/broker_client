@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
 
@@ -38,6 +38,7 @@ where
                 code: self.code.to_string(),
                 message: self.message,
                 detail: Value::Null,
+                status: None,
             })
         }
     }
@@ -53,6 +54,7 @@ where
                 code: self.code.to_string(),
                 message: self.message,
                 detail: Value::Null,
+                status: None,
             })
         }
     }
@@ -77,6 +79,16 @@ pub struct ApiErrorBody {
     pub detail: Value,
 }
 
+/// A-share bare error body: `{ "error": "..." }`.
+///
+/// This is the shape handlers produce before the `/v1` middleware rewrites it
+/// into [`ApiErrorBody`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BareErrorBody {
+    /// Server-provided message.
+    pub error: String,
+}
+
 /// Parses a TW error body into an [`Error::Api`] if the shape matches.
 pub fn parse_tw_error_body(body: &str) -> Option<Error> {
     serde_json::from_str::<TwErrorEnvelope>(body)
@@ -85,34 +97,69 @@ pub fn parse_tw_error_body(body: &str) -> Option<Error> {
             code: envelope.detail.code,
             message: envelope.detail.message,
             detail: envelope.detail.detail,
+            status: None,
         })
 }
 
 /// Parses an A-share error body into an [`Error::Api`] if the shape matches.
+///
+/// The `/v1` group rewrites `{ "error": ... }` into
+/// `{ "code", "message", "detail" }`, but the pre-rewrite shape is mapped the
+/// same way so a route without that middleware cannot degrade into an opaque
+/// [`Error::Http`] that hides the server's message.
 pub fn parse_a_error_body(body: &str) -> Option<Error> {
-    let parsed: ApiErrorBody = serde_json::from_str(body).ok()?;
-    // A successful response could coincidentally have these fields; this
-    // helper is only called for non-2xx responses, so any matching object is
-    // treated as a documented API error.
+    if let Ok(parsed) = serde_json::from_str::<ApiErrorBody>(body) {
+        // A successful response could coincidentally have these fields; this
+        // helper is only called for non-2xx responses, so any matching object
+        // is treated as a documented API error.
+        return Some(Error::Api {
+            code: parsed.code,
+            message: parsed.message,
+            detail: parsed.detail,
+            status: None,
+        });
+    }
+
+    let bare: BareErrorBody = serde_json::from_str(body).ok()?;
     Some(Error::Api {
-        code: parsed.code,
-        message: parsed.message,
-        detail: parsed.detail,
+        code: "error".to_owned(),
+        message: bare.error,
+        detail: json!({}),
+        status: None,
     })
 }
 
 /// Converts an HTTP error status/body into the most specific [`Error`].
 ///
-/// It first tries the TW failure envelope, then the A-share error body.
-/// Unknown bodies become a plain [`Error::Http`] so raw data is preserved.
+/// It first tries the TW failure envelope, then the A-share error body. API
+/// errors retain the HTTP status so GET retry policy can still distinguish 429
+/// and 5xx responses. Unknown bodies become a plain [`Error::Http`] so raw data
+/// is preserved.
 pub fn http_error(status: u16, body: String) -> Error {
     if let Some(err) = parse_tw_error_body(&body) {
-        return err;
+        return attach_http_status(err, status);
     }
     if let Some(err) = parse_a_error_body(&body) {
-        return err;
+        return attach_http_status(err, status);
     }
     Error::Http { status, body }
+}
+
+fn attach_http_status(error: Error, status: u16) -> Error {
+    match error {
+        Error::Api {
+            code,
+            message,
+            detail,
+            ..
+        } => Error::Api {
+            code,
+            message,
+            detail,
+            status: Some(status),
+        },
+        error => error,
+    }
 }
 
 #[cfg(test)]
@@ -156,7 +203,7 @@ mod tests {
         let err = parse_tw_error_body(raw).unwrap();
         assert!(matches!(
             err,
-            Error::Api { code, message, detail } if code == "RATE_LIMITED" && message == "slow down" && detail == json!({"hint": 1})
+            Error::Api { code, message, detail, .. } if code == "RATE_LIMITED" && message == "slow down" && detail == json!({"hint": 1})
         ));
     }
 
@@ -166,7 +213,7 @@ mod tests {
         let err = parse_a_error_body(raw).unwrap();
         assert!(matches!(
             err,
-            Error::Api { code, message, detail } if code == "error" && message == "bad" && detail == json!({"field": "x"})
+            Error::Api { code, message, detail, .. } if code == "error" && message == "bad" && detail == json!({"field": "x"})
         ));
     }
 
@@ -188,5 +235,26 @@ mod tests {
                 Error::Http { status: s, body } if s == status && body == "raw body"
             ));
         }
+    }
+
+    #[test]
+    fn bare_error_body_maps_to_api_error_like_the_v1_middleware() {
+        // The A server's `v1_error_middleware` rewrites `{"error": msg}` into
+        // `{code,message,detail}`. Mapping the pre-rewrite shape identically
+        // keeps routes without that middleware from degrading into an opaque
+        // `Error::Http` that hides the server's message.
+        let err = http_error(404, r#"{"error": "mock 账户尚未初始化"}"#.to_owned());
+        assert!(matches!(
+            err,
+            Error::Api {
+                code,
+                message,
+                detail,
+                status,
+            } if code == "error"
+                && message == "mock 账户尚未初始化"
+                && detail == json!({})
+                && status == Some(404)
+        ));
     }
 }

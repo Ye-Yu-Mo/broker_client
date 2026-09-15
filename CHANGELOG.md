@@ -16,6 +16,50 @@
 
 ---
 
+## [0.4.0] - 2026-09-15
+
+### Added
+
+- A 股 `OrderRequest::mock(...)` 构造器与 `mock` 字段，对应服务端 `POST /v1/orders` 的 `mock=true` 模拟撮合（不提交真实委托，按 GUI 盘口模拟全量成交）
+- A 股 `Order` 新增 `mock` / `fill_price` / `filled_at_ms` 字段，用于读取 mock 成交回执（`contract_id` 无类型化字段，仍保留在 `extra` 中不丢数据）
+- `AClient::mock_account()` → `GET /v1/mock/account`
+- `AClient::init_mock_account()` → `POST /v1/mock/init_account`
+- 新增类型 `MockAccount` / `MockPosition` / `InitMockAccountRequest`，与 A server `state/mock.rs` 字段一一对应，并在 crate 根重导出
+- 响应解析：A 股 `{"error": "..."}` 形式的错误体也映射为 `Error::Api`，与 `/v1` 错误中间件重写后的 `{code,message,detail}` 信封保持一致
+- 统一 `OrderRequest` 新增 `mock: Option<bool>` 字段与 `with_mock(bool)` builder，两个 server 的 mock 下单均可从统一请求发起
+- `HttpClient::delete_json()`：DELETE + JSON 解码，写操作不重试
+- `TwClient::init_mock_account()` → `POST /api/v1/mock/accounts/init`
+- `TwClient::mock_account()` → `GET /api/v1/mock/accounts/{account}`
+- `TwClient::deactivate_mock_account()` → `DELETE /api/v1/mock/accounts/{account}`
+- 新增类型 `MockAccountInitRequest` / `MockPositionInit` / `MockAccount`，请求侧与响应侧的持仓结构差异由两个类型分别表达
+- 新增 TW `ApCode` 语义枚举（`Regular` / `OddLot` / `IntradayOddLot` / `AfterHours`）和 `OrderRequest::with_ap_code()`；请求序列化为语义字符串，反序列化同时兼容旧数字 `0/2/4/7`，非法值不回退
+- `BrokerClient` 新增统一 `mock_account()` / `init_mock_account()`；A/TW 可通过同一份 trait-object 流程完成模拟账户初始化、查询、mock 下单和查单，默认实现让第三方 `BrokerClient` 实现保持源码兼容
+- 新增统一 `MockAccountInitRequest` / `MockPositionInit` / `MockAccount`，由 A/TW 实现映射各自不同的字段名、持仓形状和时间格式；统一 `OrderStatus` 新增类型化 `mock` 字段
+- 新增统一 `BrokerEvent::MockAccountChanged` 与 `BrokerEvent::WsLagged`，A 股 `AEvent` 可识别 `mock.account_changed` / `ws.lagged` 并保留 data/timestamp；`ws.lagged.data.skipped` 可直接读取
+- TW 客户端继续将 A 股专属事件保留为 `Unknown`，不伪造 TW server 不提供的语义
+
+### Changed
+
+- A 股订单请求体新增 `mock` 字段；`mock=false` 时不序列化，不启用 mock 的请求体与 0.3.0 逐字节一致
+- `AClient::submit_order` 增加 `mock && dry_run` 本地前置校验，直接返回 `Error::InvalidRequest` 而不发请求（服务端本就会 `400`，只是提前到客户端）
+- A 股 `Order` → 统一 `OrderStatus` 的转换把 mock 成交回执折回 `extra`，统一视图不丢字段
+- **破坏性变更（`types::OrderRequest` 结构体加字段）**：`types::OrderRequest` 新增 `mock` / `ap_code` 字段并改为 `derive(Default)`，`types::OrderAction` 同步 `derive(Default)`（缺省 `New`）。下游若用结构体字面量构造 `OrderRequest`，需补 `..Default::default()`（本仓库 `tests/unified.rs` 已改）。`AClient::submit_order` / `TwClient::submit_order` 现在把统一请求的 `mock` 透传给各自 server；`OrderRequest::a_new(...).with_mock(true)` 在 A 端不再被静默忽略。`ap_code=None` 时字段不序列化，服务端沿用 `REGULAR` 默认值
+- **Breaking API change**：`a::Order` 和统一 `OrderStatus` 新增公共字段，旧的无 `..` struct literal 无法继续编译；`derive(Default)` 仅提供迁移写法，不能恢复旧 literal 兼容性。迁移请使用构造器或 `..Default::default()`
+- **Breaking API change**：A 股专用 `a::OrderRequest` 新增公开 `mock: bool` 字段；旧版下游使用不带该字段的完整 struct literal 会触发 `E0063`。请改用 `AOrderRequest::new(...)` / `AOrderRequest::mock(...)` 构造器，或在字面量中补 `mock` 字段
+- **Breaking API change**：`AEvent` / `BrokerEvent` 新增事件变体，穷举 `match` 必须补 `MockAccountChanged` / `WsLagged`，或增加 wildcard 分支
+- `OrderStatus` 新增的可选字段在值为 `None` 时不再序列化为 `null`，保持旧状态 JSON 输出形状；字段有值时仍正常输出
+
+- **Breaking API change**：`Error::Api` 新增 `status: Option<u16>`，用于保留 HTTP API 错误状态并恢复 GET 429/5xx 重试；下游显式解构 `Error::Api` 时需增加该字段或使用 `..`
+- TW `submit_stock_order`、`order.updated` / 查单响应现在会从嵌套 `data` 提升 `mock`、`fill_price`、`filled_qty`（兼容 `filled_quantity`）到统一 `OrderStatus`，同时保留原始 payload
+- 修复 TW mock 统一初始化在 `i64::MAX as f64` 舍入边界上的超范围数量转换
+- TW mock 账户名校验与服务端对齐 `min_length=6` / `max_length=64`
+
+### Security
+
+- 无
+
+---
+
 ## [0.3.0] - 2026-08-29
 
 ### Added

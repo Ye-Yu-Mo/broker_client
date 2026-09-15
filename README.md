@@ -86,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | A `AccountFunds` / TW `Balance` | `types::Account` | `total_asset`、`available`、`total_balance`、`withdrawable` 等均可用 |
 | A `AEvent` / TW `TwEvent` | `types::BrokerEvent` | 统一事件枚举，未知事件保留原始 `type`、`data`、`timestamp_ms` |
 
-旧的 `AClient` / `TwClient` 专用类型和方法继续保留，现有调用方无需修改。
+旧的 `AClient` / `TwClient` 专用**方法**继续保留，现有 HTTP/WS 方法调用语义不变。
+
+⚠️ **0.4.0 有明确的源码级 breaking change**：`a::Order`、统一 `OrderRequest`、统一 `OrderStatus` 增加了公开字段，旧的无 `..` struct literal 需要补字段或改用构造器；`AEvent` / `BrokerEvent` 增加了事件变体，穷举 `match` 需要补 `MockAccountChanged` / `WsLagged`，或增加 wildcard 分支。`derive(Default)` 不能让旧的 field-complete struct literal 恢复编译。详见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 快速开始
 

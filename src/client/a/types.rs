@@ -192,6 +192,15 @@ pub struct Order {
     /// Filled quantity.
     #[serde(default)]
     pub filled_quantity: Option<f64>,
+    /// Whether this record was filled by the GUI-backed mock path.
+    #[serde(default)]
+    pub mock: Option<bool>,
+    /// Simulated or broker-reported execution price.
+    #[serde(default)]
+    pub fill_price: Option<f64>,
+    /// Execution time of the fill (epoch ms).
+    #[serde(default)]
+    pub filled_at_ms: Option<u64>,
     /// Order status/message text.
     #[serde(default)]
     pub status: Option<String>,
@@ -374,6 +383,13 @@ pub struct OrderRequest {
     pub quantity: i64,
     /// `true` only fills the form and does not click confirm.
     pub dry_run: bool,
+    /// `true` reads the GUI bid/ask and simulates a full fill without
+    /// submitting an order. Mutually exclusive with [`Self::dry_run`].
+    ///
+    /// Omitted from the request body when `false`: the server defaults it to
+    /// `false`, so leaving it out keeps existing bodies byte-identical.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mock: bool,
 }
 
 impl OrderRequest {
@@ -394,8 +410,32 @@ impl OrderRequest {
             price,
             quantity,
             dry_run,
+            mock: false,
         }
     }
+
+    /// Creates a mock order request.
+    ///
+    /// The server reads the live GUI bid/ask and simulates a full fill at the
+    /// opposite side's price. No real order is submitted, and a mock fill is
+    /// settled against the server-side mock account rather than the real one.
+    pub fn mock(
+        client_order_id: impl Into<String>,
+        symbol: impl Into<String>,
+        side: impl Into<String>,
+        price: f64,
+        quantity: i64,
+    ) -> Self {
+        Self {
+            mock: true,
+            ..Self::new(client_order_id, symbol, side, price, quantity, false)
+        }
+    }
+}
+
+/// `skip_serializing_if` helper for `bool` flags the server defaults to `false`.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Request body for `POST /v1/orders/{client_order_id}/cancel`.
@@ -562,6 +602,53 @@ impl PanicRequest {
     }
 }
 
+/// One simulated position held by the A-share mock account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MockPosition {
+    /// Stock symbol/code.
+    pub symbol: String,
+    /// Total simulated quantity.
+    pub quantity: f64,
+    /// Simulated quantity available to sell.
+    pub available_quantity: f64,
+    /// Simulated average cost.
+    #[serde(default)]
+    pub average_cost: f64,
+}
+
+/// The single persistent mock account kept by the A server.
+///
+/// It is fully isolated from the real 同花顺 account and is only touched by
+/// `mock=true` orders and the `/v1/mock/*` endpoints.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MockAccount {
+    /// Simulated available cash.
+    pub cash: f64,
+    /// Simulated positions.
+    #[serde(default)]
+    pub positions: Vec<MockPosition>,
+    /// Creation time (epoch ms).
+    pub created_at_ms: u64,
+    /// Last update time (epoch ms).
+    pub updated_at_ms: u64,
+}
+
+/// Request body for `POST /v1/mock/init_account`.
+///
+/// The server keeps exactly one mock account. Re-initializing an existing
+/// account requires [`Self::reset`]; otherwise the server answers `409`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct InitMockAccountRequest {
+    /// Initial simulated cash.
+    pub cash: f64,
+    /// Initial simulated positions.
+    #[serde(default)]
+    pub positions: Vec<MockPosition>,
+    /// `true` overwrites an already initialized account.
+    #[serde(default)]
+    pub reset: bool,
+}
+
 /// WebSocket events pushed by the A-share server.
 ///
 /// Every known variant keeps the raw `data` JSON and the optional
@@ -642,6 +729,20 @@ pub enum AEvent {
         /// Server timestamp in milliseconds.
         timestamp_ms: Option<i64>,
     },
+    /// `mock.account_changed`
+    MockAccountChanged {
+        /// Raw event payload containing the updated mock account.
+        data: Value,
+        /// Server timestamp in milliseconds.
+        timestamp_ms: Option<i64>,
+    },
+    /// `ws.lagged`
+    WsLagged {
+        /// Raw event payload, including the number of skipped events.
+        data: Value,
+        /// Server timestamp in milliseconds.
+        timestamp_ms: Option<i64>,
+    },
     /// Any other event type.
     Unknown {
         /// Original `type` string.
@@ -717,6 +818,14 @@ impl<'de> Deserialize<'de> for AEvent {
                 data,
                 timestamp_ms: timestamp,
             },
+            "mock.account_changed" => AEvent::MockAccountChanged {
+                data,
+                timestamp_ms: timestamp,
+            },
+            "ws.lagged" => AEvent::WsLagged {
+                data,
+                timestamp_ms: timestamp,
+            },
             _ => AEvent::Unknown {
                 type_name,
                 data,
@@ -769,6 +878,10 @@ impl From<AEvent> for crate::types::BrokerEvent {
             AEvent::HealthChanged { data, timestamp_ms } => {
                 BrokerEvent::HealthChanged { data, timestamp_ms }
             }
+            AEvent::MockAccountChanged { data, timestamp_ms } => {
+                BrokerEvent::MockAccountChanged { data, timestamp_ms }
+            }
+            AEvent::WsLagged { data, timestamp_ms } => BrokerEvent::WsLagged { data, timestamp_ms },
             AEvent::Unknown {
                 type_name,
                 data,
@@ -976,6 +1089,8 @@ mod tests {
             ("order.manual_review", "OrderManualReview"),
             ("risk.panic", "RiskPanic"),
             ("health.changed", "HealthChanged"),
+            ("mock.account_changed", "MockAccountChanged"),
+            ("ws.lagged", "WsLagged"),
         ];
 
         for (type_name, variant) in cases {
@@ -996,6 +1111,8 @@ mod tests {
                 AEvent::OrderManualReview { .. } => "OrderManualReview",
                 AEvent::RiskPanic { .. } => "RiskPanic",
                 AEvent::HealthChanged { .. } => "HealthChanged",
+                AEvent::MockAccountChanged { .. } => "MockAccountChanged",
+                AEvent::WsLagged { .. } => "WsLagged",
                 AEvent::Unknown { .. } => "Unknown",
             };
             assert_eq!(name, variant);
@@ -1105,6 +1222,77 @@ mod tests {
     }
 
     #[test]
+    fn a_event_new_v040_types_preserve_payload_and_timestamp() {
+        let mock: AEvent = serde_json::from_value(json!({
+            "type": "mock.account_changed",
+            "timestamp_ms": 1730000000000_i64,
+            "data": {"cash": 100000.0, "positions": []}
+        }))
+        .unwrap();
+        assert!(matches!(
+            mock,
+            AEvent::MockAccountChanged { data, timestamp_ms }
+                if data["cash"] == 100000.0 && timestamp_ms == Some(1730000000000)
+        ));
+
+        let lagged: AEvent = serde_json::from_value(json!({
+            "type": "ws.lagged",
+            "timestamp_ms": 1730000000001_i64,
+            "data": {"skipped": 17, "message": "consumer lagged, some events were skipped"}
+        }))
+        .unwrap();
+        match lagged {
+            AEvent::WsLagged { data, timestamp_ms } => {
+                assert_eq!(data["skipped"], 17);
+                assert_eq!(timestamp_ms, Some(1730000000001));
+            }
+            other => panic!("expected WsLagged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_event_new_v040_types_convert_to_unified_events() {
+        let mock: AEvent = serde_json::from_value(json!({
+            "type": "mock.account_changed",
+            "timestamp_ms": 42,
+            "data": {"updated": true}
+        }))
+        .unwrap();
+        assert!(matches!(
+            crate::types::BrokerEvent::from(mock),
+            crate::types::BrokerEvent::MockAccountChanged {
+                data,
+                timestamp_ms: Some(42)
+            } if data["updated"] == true
+        ));
+
+        let lagged: AEvent = serde_json::from_value(json!({
+            "type": "ws.lagged",
+            "timestamp_ms": 43,
+            "data": {"skipped": 3}
+        }))
+        .unwrap();
+        assert!(matches!(
+            crate::types::BrokerEvent::from(lagged),
+            crate::types::BrokerEvent::WsLagged {
+                data,
+                timestamp_ms: Some(43)
+            } if data["skipped"] == 3
+        ));
+    }
+
+    #[test]
+    fn a_event_unknown_type_remains_unknown_after_new_types_are_added() {
+        let event: AEvent = serde_json::from_value(json!({
+            "type": "future.event",
+            "timestamp_ms": 44,
+            "data": {"x": 1}
+        }))
+        .unwrap();
+        assert!(matches!(event, AEvent::Unknown { type_name, .. } if type_name == "future.event"));
+    }
+
+    #[test]
     fn a_event_without_timestamp_still_parses() {
         let event: AEvent = serde_json::from_value(json!({
             "type": "order.updated",
@@ -1125,5 +1313,149 @@ mod tests {
         // AEvent's Deserialize is strict; the WebSocket layer converts malformed
         // text into an Unknown event so the stream never panics.
         assert!(serde_json::from_str::<AEvent>("not json").is_err());
+    }
+
+    #[test]
+    fn order_request_without_mock_keeps_the_030_wire_bytes() {
+        // Regression guard: adding `mock` must not add a byte to existing
+        // request bodies. `dry_run=false` still serializes because it has been
+        // part of the wire contract since 0.1.0; `mock=false` is omitted
+        // because the server defaults it to false.
+        let request = OrderRequest::new("C1", "512100", "buy", 3.305, 100, false);
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"client_order_id":"C1","symbol":"512100","side":"buy","price":3.305,"quantity":100,"dry_run":false}"#
+        );
+    }
+
+    #[test]
+    fn order_request_mock_constructor_sends_mock_with_dry_run_false() {
+        let request = OrderRequest::mock("c1", "512100", "buy", 3.305, 100);
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"client_order_id":"c1","symbol":"512100","side":"buy","price":3.305,"quantity":100,"dry_run":false,"mock":true}"#
+        );
+    }
+
+    #[test]
+    fn order_parses_mock_fill_receipt_fields() {
+        let order: Order = serde_json::from_value(json!({
+            "client_order_id": "c1",
+            "status": "Filled",
+            "symbol": "512100",
+            "side": "buy",
+            "price": 3.305,
+            "quantity": 100.0,
+            "dry_run": false,
+            "mock": true,
+            "contract_id": "MOCK-1787910698040-c1",
+            "fill_price": 3.312,
+            "filled_quantity": 100.0,
+            "filled_at_ms": 1787910698040_u64,
+            "message": "mock 全量成交"
+        }))
+        .unwrap();
+        assert_eq!(order.mock, Some(true));
+        assert_eq!(order.fill_price, Some(3.312));
+        assert_eq!(order.filled_quantity, Some(100.0));
+        assert_eq!(order.filled_at_ms, Some(1787910698040));
+        // `contract_id` has no typed slot yet and must stay reachable.
+        assert_eq!(order.extra["contract_id"], "MOCK-1787910698040-c1");
+    }
+
+    #[test]
+    fn order_without_mock_receipt_fields_is_none() {
+        // Real and dry-run responses carry explicit nulls for the receipt
+        // fields; older servers omit them entirely. Both become `None`.
+        let explicit_null: Order = serde_json::from_value(json!({
+            "client_order_id": "c2",
+            "status": "Submitted",
+            "dry_run": true,
+            "mock": false,
+            "fill_price": null,
+            "filled_quantity": null,
+            "filled_at_ms": null
+        }))
+        .unwrap();
+        assert_eq!(explicit_null.mock, Some(false));
+        assert_eq!(explicit_null.fill_price, None);
+        assert_eq!(explicit_null.filled_quantity, None);
+        assert_eq!(explicit_null.filled_at_ms, None);
+
+        let absent: Order = serde_json::from_value(json!({"client_order_id": "c3"})).unwrap();
+        assert_eq!(absent.mock, None);
+        assert_eq!(absent.fill_price, None);
+        assert_eq!(absent.filled_at_ms, None);
+    }
+
+    #[test]
+    fn mock_account_parses_server_shape() {
+        let account: MockAccount = serde_json::from_value(json!({
+            "cash": 100000.0,
+            "positions": [{
+                "symbol": "518850",
+                "quantity": 1000.0,
+                "available_quantity": 900.0,
+                "average_cost": 9.0
+            }],
+            "created_at_ms": 1787910698040_u64,
+            "updated_at_ms": 1787910698041_u64
+        }))
+        .unwrap();
+        assert_eq!(account.cash, 100000.0);
+        assert_eq!(account.positions.len(), 1);
+        assert_eq!(account.positions[0].symbol, "518850");
+        assert_eq!(account.positions[0].quantity, 1000.0);
+        assert_eq!(account.positions[0].available_quantity, 900.0);
+        assert_eq!(account.positions[0].average_cost, 9.0);
+        assert_eq!(account.created_at_ms, 1787910698040);
+        assert_eq!(account.updated_at_ms, 1787910698041);
+    }
+
+    #[test]
+    fn mock_account_defaults_positions_and_average_cost() {
+        let account: MockAccount = serde_json::from_value(json!({
+            "cash": 0.0,
+            "positions": [{"symbol": "518850", "quantity": 1.0, "available_quantity": 1.0}],
+            "created_at_ms": 1_u64,
+            "updated_at_ms": 1_u64
+        }))
+        .unwrap();
+        assert_eq!(account.positions[0].average_cost, 0.0);
+
+        let empty: MockAccount = serde_json::from_value(json!({
+            "cash": 0.0,
+            "created_at_ms": 1_u64,
+            "updated_at_ms": 1_u64
+        }))
+        .unwrap();
+        assert!(empty.positions.is_empty());
+    }
+
+    #[test]
+    fn init_mock_account_request_serializes_server_shape() {
+        let request = InitMockAccountRequest {
+            cash: 100000.0,
+            positions: vec![MockPosition {
+                symbol: "518850".to_owned(),
+                quantity: 1000.0,
+                available_quantity: 1000.0,
+                average_cost: 9.0,
+            }],
+            reset: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"cash":100000.0,"positions":[{"symbol":"518850","quantity":1000.0,"available_quantity":1000.0,"average_cost":9.0}],"reset":false}"#
+        );
+
+        let reset = InitMockAccountRequest {
+            cash: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&reset).unwrap(),
+            r#"{"cash":0.0,"positions":[],"reset":false}"#
+        );
     }
 }

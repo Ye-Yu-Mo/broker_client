@@ -29,6 +29,9 @@ pub enum Error {
         message: String,
         /// Extra structured detail.
         detail: Value,
+        /// HTTP status when this API error came from a non-2xx response.
+        /// `None` means the error came from an application-level envelope.
+        status: Option<u16>,
     },
     /// JSON decoding failed.
     Decode {
@@ -57,6 +60,7 @@ impl fmt::Display for Error {
                 code,
                 message,
                 detail,
+                ..
             } => {
                 write!(f, "api error {code}: {message} (detail: {detail})")
             }
@@ -105,8 +109,10 @@ impl Error {
         match self {
             Error::Transport(_) | Error::Timeout => true,
             Error::Http { status, .. } => *status == 429 || *status >= 500,
-            Error::Api { .. }
-            | Error::Decode { .. }
+            Error::Api { status, .. } => {
+                status.is_some_and(|status| status == 429 || status >= 500)
+            }
+            Error::Decode { .. }
             | Error::WebSocket(_)
             | Error::InvalidUrl(_)
             | Error::InvalidRequest(_) => false,
@@ -144,6 +150,7 @@ mod tests {
             code: "ORDER_NOT_FOUND".to_owned(),
             message: "missing".to_owned(),
             detail: json!({"id": "x"}),
+            status: None,
         };
         assert!(err.to_string().contains("ORDER_NOT_FOUND"));
     }
@@ -153,6 +160,40 @@ mod tests {
         let err = Error::InvalidRequest("replace must set new_price and/or new_quantity".into());
         assert!(err.to_string().contains("invalid request"));
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retryable_api_statuses_are_identified() {
+        for status in [429, 500, 503] {
+            assert!(
+                Error::Api {
+                    code: "error".into(),
+                    message: "busy".into(),
+                    detail: serde_json::Value::Null,
+                    status: Some(status),
+                }
+                .is_retryable(),
+                "HTTP {status} API errors must be retryable"
+            );
+        }
+        assert!(
+            !Error::Api {
+                code: "error".into(),
+                message: "bad request".into(),
+                detail: serde_json::Value::Null,
+                status: Some(400),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !Error::Api {
+                code: "error".into(),
+                message: "application error".into(),
+                detail: serde_json::Value::Null,
+                status: None,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -184,7 +225,8 @@ mod tests {
             !Error::Api {
                 code: "X".into(),
                 message: "y".into(),
-                detail: serde_json::Value::Null
+                detail: serde_json::Value::Null,
+                status: None
             }
             .is_retryable()
         );

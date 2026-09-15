@@ -631,6 +631,11 @@ pub struct StockInfo {
     pub extra: Value,
 }
 
+/// TW domestic-stock order category for `POST /api/v1/orders/stock`.
+///
+/// Re-exported from the unified type model.
+pub use crate::types::ApCode;
+
 /// Order action for `POST /api/v1/orders/stock`.
 ///
 /// Re-exported from the unified type model.
@@ -646,6 +651,33 @@ pub use crate::types::OrderRequest;
 ///
 /// This is an alias of the unified [`crate::types::OrderStatus`] super-set.
 pub use crate::types::OrderStatus;
+
+/// Promotes mock execution fields from a TW order's nested `data` object.
+///
+/// The server's `order.updated` payload is a status envelope whose execution
+/// details live under `data`: `{data: {mock, fill_price, filled_qty}}`. Keep
+/// that raw object in `OrderStatus.data`, but expose the stable fields at the
+/// unified status level as well. Top-level fields win for compatibility with
+/// older/alternate server payloads.
+pub(crate) fn promote_mock_execution_fields(status: &mut OrderStatus, raw: &Value) {
+    let nested = raw.get("data").and_then(Value::as_object);
+    let field = |name: &str| {
+        raw.get(name)
+            .or_else(|| nested.and_then(|data| data.get(name)))
+    };
+
+    if status.mock.is_none() {
+        status.mock = field("mock").and_then(Value::as_bool);
+    }
+    if status.fill_price.is_none() {
+        status.fill_price = field("fill_price").and_then(Value::as_f64);
+    }
+    if status.filled_quantity.is_none() {
+        status.filled_quantity = field("filled_quantity")
+            .or_else(|| field("filled_qty"))
+            .and_then(Value::as_f64);
+    }
+}
 
 /// A full order record returned by order query endpoints.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -777,6 +809,81 @@ impl RecoveryResolveRequest {
     }
 }
 
+/// One initial position for a simulated account.
+///
+/// The request names the code `stk_code`; the response nests the same data
+/// under a `stk_code` key inside a map, which is why the response side keeps
+/// [`MockAccount::positions`] as raw JSON instead of reusing this type.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MockPositionInit {
+    /// Stock code.
+    pub stk_code: String,
+    /// Initial quantity.
+    #[serde(default)]
+    pub quantity: i64,
+    /// Initial average cost, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_price: Option<f64>,
+}
+
+/// Request body for `POST /api/v1/mock/accounts/init`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MockAccountInitRequest {
+    /// Simulated account name.
+    ///
+    /// Must match `^MOCK-[A-Za-z0-9][A-Za-z0-9_.-]*$`; the client rejects any
+    /// other name locally before sending a request.
+    pub account: String,
+    /// Initial simulated cash.
+    pub cash: f64,
+    /// Initial simulated positions.
+    #[serde(default)]
+    pub positions: Vec<MockPositionInit>,
+}
+
+/// A server-maintained simulated TW account.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MockAccount {
+    /// Account name.
+    #[serde(default)]
+    pub account: String,
+    /// Simulated cash.
+    #[serde(default)]
+    pub cash: f64,
+    /// `stk_code` -> position map, passed through verbatim so a server-side
+    /// shape change can never break parsing.
+    #[serde(default)]
+    pub positions: Value,
+    /// Whether the account still accepts new orders.
+    #[serde(default)]
+    pub active: bool,
+    /// Creation time (ISO 8601).
+    #[serde(default)]
+    pub created_at: String,
+    /// Last update time (ISO 8601).
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// Returns whether `account` belongs to the server's `MOCK-` namespace.
+///
+/// Mirrors `stock_broker_tw_server`'s `_MOCK_ACCOUNT_RE` exactly
+/// (`^MOCK-[A-Za-z0-9][A-Za-z0-9_.-]*$`), so a name that fails here can never
+/// succeed on the server.
+pub(crate) fn is_mock_account(account: &str) -> bool {
+    let Some(rest) = account.strip_prefix("MOCK-") else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
 /// WebSocket event pushed by the TW server.
 ///
 /// The event is dispatched by its `type` field. Unknown event types are kept
@@ -858,9 +965,12 @@ impl<'de> serde::Deserialize<'de> for TwEvent {
             "real_report_merge" => TwEvent::RealReportMerge(
                 serde_json::from_value(data).map_err(serde::de::Error::custom)?,
             ),
-            "order.updated" => TwEvent::OrderUpdated(
-                serde_json::from_value(data).map_err(serde::de::Error::custom)?,
-            ),
+            "order.updated" => {
+                let mut status: OrderStatus =
+                    serde_json::from_value(data.clone()).map_err(serde::de::Error::custom)?;
+                promote_mock_execution_fields(&mut status, &data);
+                TwEvent::OrderUpdated(status)
+            }
             "quote.updated" => TwEvent::QuoteUpdated(data),
             "heartbeat" => TwEvent::Heartbeat(data),
             "SubscribeWatchlist" => TwEvent::SubscribeWatchlist(data),
@@ -1013,6 +1123,118 @@ mod tests {
     }
 
     #[test]
+    fn order_updated_promotes_nested_mock_execution_fields() {
+        let event: TwEvent = serde_json::from_value(json!({
+            "type": "order.updated",
+            "data": {
+                "client_order_id": "M1",
+                "status": "FILLED",
+                "data": {
+                    "mock": true,
+                    "fill_price": 101.0,
+                    "filled_qty": 10,
+                    "future_field": "preserved"
+                }
+            }
+        }))
+        .unwrap();
+
+        match event {
+            TwEvent::OrderUpdated(status) => {
+                assert_eq!(status.mock, Some(true));
+                assert_eq!(status.fill_price, Some(101.0));
+                assert_eq!(status.filled_quantity, Some(10.0));
+                assert_eq!(status.data.as_ref().unwrap()["filled_qty"], 10);
+                assert_eq!(status.data.as_ref().unwrap()["future_field"], "preserved");
+            }
+            other => panic!("expected order update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_updated_prefers_explicit_fields_and_accepts_filled_quantity_alias() {
+        let event: TwEvent = serde_json::from_value(json!({
+            "type": "order.updated",
+            "data": {
+                "client_order_id": "M2",
+                "status": "FILLED",
+                "mock": false,
+                "fill_price": 99.0,
+                "filled_quantity": 2.0,
+                "data": {
+                    "mock": true,
+                    "fill_price": 101.0,
+                    "filled_quantity": 10.0
+                }
+            }
+        }))
+        .unwrap();
+
+        match event {
+            TwEvent::OrderUpdated(status) => {
+                assert_eq!(status.mock, Some(false));
+                assert_eq!(status.fill_price, Some(99.0));
+                assert_eq!(status.filled_quantity, Some(2.0));
+            }
+            other => panic!("expected order update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_status_promotes_nested_mock_execution_fields() {
+        let event: TwEvent = serde_json::from_value(json!({
+            "type": "order.updated",
+            "data": {
+                "client_order_id": "M1",
+                "status": "FILLED",
+                "data": {
+                    "mock": true,
+                    "fill_price": 101.0,
+                    "filled_qty": 10,
+                    "future_field": "preserved"
+                }
+            }
+        }))
+        .unwrap();
+
+        let TwEvent::OrderUpdated(status) = event else {
+            panic!("expected order update");
+        };
+        assert_eq!(status.mock, Some(true));
+        assert_eq!(status.fill_price, Some(101.0));
+        assert_eq!(status.filled_quantity, Some(10.0));
+        assert_eq!(status.data.as_ref().unwrap()["filled_qty"], 10);
+        assert_eq!(status.data.as_ref().unwrap()["future_field"], "preserved");
+    }
+
+    #[test]
+    fn order_status_prefers_explicit_fields_and_accepts_filled_quantity_alias() {
+        let event: TwEvent = serde_json::from_value(json!({
+            "type": "order.updated",
+            "data": {
+                "client_order_id": "M2",
+                "status": "FILLED",
+                "mock": false,
+                "fill_price": 99.0,
+                "filled_quantity": 2.0,
+                "data": {
+                    "mock": true,
+                    "fill_price": 101.0,
+                    "filled_qty": 10.0
+                }
+            }
+        }))
+        .unwrap();
+
+        let TwEvent::OrderUpdated(status) = event else {
+            panic!("expected order update");
+        };
+        assert_eq!(status.mock, Some(false));
+        assert_eq!(status.fill_price, Some(99.0));
+        assert_eq!(status.filled_quantity, Some(2.0));
+    }
+
+    #[test]
     fn replace_requests_are_mutually_exclusive() {
         let price = OrderRequest::replace_price("C1", "A", "H1", "2330", "B", 510.0);
         let qty = OrderRequest::replace_quantity("C2", "A", "H1", "2330", "B", 20);
@@ -1089,6 +1311,41 @@ mod tests {
     }
 
     #[test]
+    fn tw_a_share_only_events_remain_unknown() {
+        for type_name in ["mock.account_changed", "ws.lagged"] {
+            let event: TwEvent = serde_json::from_value(json!({
+                "type": type_name,
+                "data": {"skipped": 3}
+            }))
+            .unwrap();
+            match event {
+                TwEvent::Unknown {
+                    type_name: actual,
+                    data,
+                } => {
+                    assert_eq!(actual, type_name);
+                    assert_eq!(data["skipped"], 3);
+                }
+                other => panic!("TW must not invent A-only event support: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tw_unknown_a_share_only_events_convert_to_unified_unknown() {
+        let event: TwEvent = serde_json::from_value(json!({
+            "type": "ws.lagged",
+            "data": {"skipped": 3}
+        }))
+        .unwrap();
+        assert!(matches!(
+            crate::types::BrokerEvent::from(event),
+            crate::types::BrokerEvent::Unknown { type_name, data, .. }
+                if type_name == "ws.lagged" && data["skipped"] == 3
+        ));
+    }
+
+    #[test]
     fn tw_event_converts_to_unified_broker_event() {
         let event: TwEvent = serde_json::from_value(json!({
             "type": "order.updated",
@@ -1118,6 +1375,94 @@ mod tests {
                 assert_eq!(timestamp_ms, None);
             }
             _ => panic!("expected unknown"),
+        }
+    }
+
+    #[test]
+    fn mock_account_init_request_serializes_server_shape() {
+        let request = MockAccountInitRequest {
+            account: "MOCK-TEST".to_owned(),
+            cash: 100000.0,
+            positions: vec![MockPositionInit {
+                stk_code: "2330".to_owned(),
+                quantity: 1000,
+                avg_price: Some(99.5),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"account":"MOCK-TEST","cash":100000.0,"positions":[{"stk_code":"2330","quantity":1000,"avg_price":99.5}]}"#
+        );
+
+        let bare = MockAccountInitRequest {
+            account: "MOCK-TEST".to_owned(),
+            cash: 0.0,
+            positions: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"account":"MOCK-TEST","cash":0.0,"positions":[]}"#
+        );
+    }
+
+    #[test]
+    fn mock_account_parses_server_shape() {
+        let account: MockAccount = serde_json::from_value(json!({
+            "account": "MOCK-TEST",
+            "cash": 90000.0,
+            "positions": {
+                "2330": {"quantity": 1000, "avg_price": 99.5}
+            },
+            "active": true,
+            "created_at": "2026-09-12T04:31:38.040000+00:00",
+            "updated_at": "2026-09-12T05:00:00.000000+00:00"
+        }))
+        .unwrap();
+        assert_eq!(account.account, "MOCK-TEST");
+        assert_eq!(account.cash, 90000.0);
+        assert!(account.active);
+        assert_eq!(account.created_at, "2026-09-12T04:31:38.040000+00:00");
+        // `positions` is a code -> position map and is passed through as-is so
+        // a server-side shape change can never break parsing.
+        assert_eq!(account.positions["2330"]["quantity"], 1000);
+        assert_eq!(account.positions["2330"]["avg_price"], 99.5);
+    }
+
+    #[test]
+    fn mock_account_tolerates_the_deactivate_fallback_payload() {
+        // `deactivate_mock_account` falls back to `{account, active}` when the
+        // row cannot be re-read; every other field must default rather than
+        // fail the whole decode.
+        let account: MockAccount = serde_json::from_value(json!({
+            "account": "MOCK-TEST",
+            "active": false
+        }))
+        .unwrap();
+        assert_eq!(account.account, "MOCK-TEST");
+        assert!(!account.active);
+        assert_eq!(account.cash, 0.0);
+        assert!(account.positions.is_null());
+        assert_eq!(account.created_at, "");
+        assert_eq!(account.updated_at, "");
+    }
+
+    #[test]
+    fn mock_account_namespace_check_matches_the_server_regex() {
+        for valid in ["MOCK-TEST", "MOCK-1", "MOCK-a.b_c-d", "MOCK-ABC123"] {
+            assert!(is_mock_account(valid), "{valid} should be accepted");
+        }
+
+        for invalid in [
+            "",
+            "MOCK-",
+            "MOCK",
+            "mock-test",
+            "MOCK- test",
+            "MOCK--test",
+            "S98875005091",
+            "MOCK-test/../x",
+        ] {
+            assert!(!is_mock_account(invalid), "{invalid} should be rejected");
         }
     }
 }

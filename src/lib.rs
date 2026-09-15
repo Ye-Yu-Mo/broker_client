@@ -20,10 +20,17 @@ pub use client::TwClient;
 
 #[cfg(feature = "client-tw")]
 pub use client::tw::{
-    Balance, ClassifyPrice, Health, Kline, LoginInfo, LoginList, LoginRequest, LoginResponse,
-    OrderAction, OrderRecord, OrderTradeReport, PnlRealized, PnlReversal, PnlUnrealized,
-    QuoteSnapshot, QuoteSubscription, QuoteType, RealReport, RealReportMerge, RecoveryItem,
-    RecoveryResolveRequest, SessionStatus, Settlement, StockInfo, SubscribedSource, Tick, TwEvent,
+    ApCode, Balance, ClassifyPrice, Health, Kline, LoginInfo, LoginList, LoginRequest,
+    LoginResponse, OrderAction, OrderRecord, OrderTradeReport, PnlRealized, PnlReversal,
+    PnlUnrealized, QuoteSnapshot, QuoteSubscription, QuoteType, RealReport, RealReportMerge,
+    RecoveryItem, RecoveryResolveRequest, SessionStatus, Settlement, StockInfo, SubscribedSource,
+    Tick, TwEvent,
+};
+
+#[cfg(feature = "client-tw")]
+pub use client::tw::{
+    MockAccount as TwMockAccount, MockAccountInitRequest as TwMockAccountInitRequest,
+    MockPositionInit as TwMockPositionInit,
 };
 
 #[cfg(feature = "client-a")]
@@ -31,12 +38,15 @@ pub use client::AClient;
 
 #[cfg(feature = "client-a")]
 pub use client::a::{
-    AEvent, AccountFunds, Cached, CancelRequest, NotifyTestResponse, Order, PanicRequest, Pnl,
-    RefreshResponse, ReplaceRequest, Trade, Transaction,
+    AEvent, AccountFunds, Cached, CancelRequest, InitMockAccountRequest, MockPosition,
+    NotifyTestResponse, Order, PanicRequest, Pnl, RefreshResponse, ReplaceRequest, Trade,
+    Transaction,
 };
 
 #[cfg(feature = "client-a")]
 pub use client::a::Health as AHealth;
+#[cfg(feature = "client-a")]
+pub use client::a::MockAccount as AMockAccount;
 #[cfg(feature = "client-a")]
 pub use client::a::OrderRequest as AOrderRequest;
 #[cfg(feature = "client-a")]
@@ -46,4 +56,7 @@ pub use auth::AuthMethod;
 pub use client::BrokerClient;
 pub use config::ClientConfig;
 pub use error::{Error, Result};
-pub use types::{Account, BrokerEvent, CancelOrderRequest, OrderRequest, OrderStatus, Position};
+pub use types::{
+    Account, BrokerEvent, CancelOrderRequest, MockAccount, MockAccountInitRequest,
+    MockPositionInit, OrderRequest, OrderStatus, Position,
+};

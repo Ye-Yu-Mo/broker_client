@@ -277,6 +277,30 @@ POST /api/v1/orders/stock
 }
 ```
 
+`mock` 是可选字段，缺省 `false`。`mock=true` 走服务端离线撮合：不登录元大、不调用 Spark API，按服务端配置的盘口（默认 `bid1=99.0`、`ask1=101.0`）全量成交，并结算到独立的 `MOCK-` 模拟账户。`mock=true` 只能使用 `MOCK-*` 账户，`mock=false` 不能用 `MOCK-*` 账户，违反任一条服务端返回 `400`。
+
+客户端用 `OrderRequest::with_mock(true)` 开启；不开启时该字段**不进入请求体**，请求字节与旧版本完全一致。
+
+`ap_code` 也是可选字段，缺省为 `REGULAR`。建议使用语义值而不是元大 SDK 的旧数字：
+
+| `ApCode` | 请求值 | 兼容旧数字 | 含义 |
+|---|---|---:|---|
+| `ApCode::Regular` | `REGULAR` | `0` | 整股 |
+| `ApCode::OddLot` | `ODD_LOT` | `2` | 零股 |
+| `ApCode::IntradayOddLot` | `INTRADAY_ODD_LOT` | `4` | 盘中零股 |
+| `ApCode::AfterHours` | `AFTER_HOURS` | `7` | 盘后交易 |
+
+```rust
+use broker_client::{ApCode, OrderRequest};
+
+let order = OrderRequest::new(
+    "C-ODD", "S98875005091", "2330", "B", 500.0, 1, "ROD", "LIMIT",
+)
+.with_ap_code(ApCode::OddLot);
+```
+
+客户端始终把 `ApCode` 序列化为语义字符串；反序列化时同时接受语义字符串和旧数字 `0/2/4/7`。不调用 `with_ap_code` 时字段不进入请求体，由服务端使用 `REGULAR` 默认值，因此既有调用行为与请求字节均不变。
+
 #### 撤单
 
 ```json
@@ -348,6 +372,75 @@ POST /api/v1/orders/stock
 GET /api/v1/orders?account=S98875005091&status=ACCEPTED
 GET /api/v1/orders/{client_order_id}
 ```
+
+### 6.5 模拟账户（mock）
+
+模拟账户使用独立的 `MOCK-` 命名空间（如 `MOCK-TEST`），与真实账户完全隔离。账户名必须匹配 `^MOCK-[A-Za-z0-9][A-Za-z0-9_.-]*$`。
+
+Mock 行情默认来自服务端配置的离线固定盘口（默认 `bid1=99.0`、`ask1=101.0`），不需要登录元大、不需要 UAT。Mock 买单按 `ask1` 成交，Mock 卖单按 `bid1` 成交，默认全部成交。
+
+#### 初始化 / 覆盖
+
+```
+POST /api/v1/mock/accounts/init
+```
+
+```json
+{
+  "account": "MOCK-TEST",
+  "cash": 100000.0,
+  "positions": [
+    {"stk_code": "2330", "quantity": 1000, "avg_price": 99.5}
+  ]
+}
+```
+
+`positions` 可省略，`avg_price` 可为 `null`。响应 `data`：
+
+```json
+{
+  "account": "MOCK-TEST",
+  "cash": 100000.0,
+  "positions": {"2330": {"quantity": 1000, "avg_price": 99.5}},
+  "active": true,
+  "created_at": "2026-09-12T04:31:38.040000+00:00",
+  "updated_at": "2026-09-12T04:31:38.040000+00:00"
+}
+```
+
+注意**请求与响应的持仓结构不同**：请求是 `stk_code/quantity/avg_price` 的数组，响应是以 `stk_code` 为键的 map。客户端因此用两个类型——`MockPositionInit` 表示请求侧，响应侧 `MockAccount::positions` 保持 `serde_json::Value` 原样透传，不做自定义反序列化。
+
+相同 cash + positions 重复 init 是幂等的；若账户已有订单/成交历史且参数不同，返回 `400 MOCK_ACCOUNT_REINITIALIZE_REQUIRES_RESET`。
+
+#### 查询
+
+```
+GET /api/v1/mock/accounts/{account}
+```
+
+未初始化或不使用 `MOCK-` 命名 → `404 MOCK_ACCOUNT_NOT_FOUND`。
+
+#### 停用
+
+```
+DELETE /api/v1/mock/accounts/{account}
+```
+
+软停用，保留历史账本；停用后新订单返回 `409 MOCK_ACCOUNT_INACTIVE`。
+
+#### 下单限制
+
+Mock 撤单/改单不会发送 Spark API：已成交订单返回 `409 MOCK_ORDER_FINAL`，未决但不支持的操作返回 `409 MOCK_OPERATION_UNSUPPORTED`。
+
+#### 客户端对应
+
+| 方法 | 端点 |
+|---|---|
+| `TwClient::init_mock_account(&MockAccountInitRequest)` | `POST /api/v1/mock/accounts/init` |
+| `TwClient::mock_account(account)` | `GET /api/v1/mock/accounts/{account}` |
+| `TwClient::deactivate_mock_account(account)` | `DELETE /api/v1/mock/accounts/{account}` |
+
+账户名不匹配 `MOCK-` 命名空间时，客户端本地直接返回 `Error::InvalidRequest`，不发请求；服务端返回的错误信封映射为 `Error::Api`（保留 `code` / `message`）。
 
 ## 7. 风控与运维控制
 
