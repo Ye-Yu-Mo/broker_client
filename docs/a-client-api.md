@@ -156,7 +156,7 @@ X-Auth-Token: <token>
 }
 ```
 
-初始化成功会推送 `mock.account_changed` 事件。
+初始化成功会推送 `mock.account_changed` 事件（见下方「[WebSocket](#websocket)」的事件清单）。
 
 ### `GET /v1/mock/account`
 
@@ -189,3 +189,7 @@ X-Auth-Token: <token>
 - `order.manual_review`：订单需要人工介入
 - `risk.panic`：手动或自动熔断状态变化
 - `health.changed`：健康状态变化
+- `mock.account_changed`：模拟账户变化（初始化模拟账户、mock 成交结算后推送）
+- `ws.lagged`：广播通道消费滞后，部分事件已被丢弃；`data.skipped` 为跳过的事件数量
+
+> `ws.lagged` 意味着**订阅方已经漏事件了**，不是心跳。收到后应重新拉取账户/持仓/委托快照，而不是继续依赖增量推送。

@@ -929,6 +929,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_mock_order_without_initialized_account_maps_to_api_error() {
+        // A `mock=true` order cannot fill without a server-side mock account;
+        // the engine answers `OrderError::Rejected("mock 账户尚未初始化")` as
+        // HTTP 400. `/v1` rewrites the bare `{"error": ...}` body into the
+        // `{code,message,detail}` envelope, and both shapes must surface as an
+        // `Api` error instead of an opaque transport failure — the caller has
+        // to be able to tell "mock 账户没初始化" apart from "网络炸了".
+        for body in [
+            json!({
+                "code": "error",
+                "message": "mock 账户尚未初始化",
+                "detail": {}
+            }),
+            json!({"error": "mock 账户尚未初始化"}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/orders"))
+                .and(body_json(json!({
+                    "client_order_id": "c1",
+                    "symbol": "512100",
+                    "side": "buy",
+                    "price": 3.305,
+                    "quantity": 100,
+                    "dry_run": false,
+                    "mock": true
+                })))
+                .respond_with(ResponseTemplate::new(400).set_body_json(body.clone()))
+                .mount(&server)
+                .await;
+
+            match client(&server)
+                .submit_order(&OrderRequest::mock("c1", "512100", "buy", 3.305, 100))
+                .await
+                .unwrap_err()
+            {
+                crate::error::Error::Api { code, message, .. } => {
+                    assert_eq!(code, "error", "for body {body}");
+                    assert_eq!(message, "mock 账户尚未初始化", "for body {body}");
+                }
+                other => panic!("expected Api error for {body}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn mock_account_get_hits_path_and_parses_typed_fields() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

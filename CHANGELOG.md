@@ -16,6 +16,27 @@
 
 ---
 
+## [0.4.1] - 2026-09-17
+
+### Added
+
+- 测试：A 股 mock 账户未初始化时下单映射为 `Error::Api`，覆盖 `/v1` 错误中间件重写前后的两种错误体
+- 测试：台股 `ApCode::AfterHours` 下单的请求体断言（补全 `ap_code` 枚举覆盖，此前只有 `ODD_LOT`）
+
+### Changed
+
+- 无
+
+### Fixed
+
+- `docs/a-client-api.md` 补齐 v0.4.0 新增的 `mock.account_changed` / `ws.lagged` WebSocket 事件，并消除「初始化会推送 `mock.account_changed`」与事件清单不一致的问题
+
+### Security
+
+- 无
+
+---
+
 ## [0.4.0] - 2026-09-15
 
 ### Added

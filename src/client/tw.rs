@@ -1773,6 +1773,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_stock_order_with_after_hours_ap_code_sends_semantic_value() {
+        // The server keeps `AFTER_HOURS` as legacy SDK number 7
+        // (`engine/state.py::_AP_CODE_VALUES`); the client always sends the
+        // semantic string, so the whole enum has to be exercised, not just the
+        // odd-lot member.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders/stock"))
+            .and(body_json(json!({
+                "client_order_id": "C-AH",
+                "action": "new",
+                "account": "S1",
+                "stk_code": "2330",
+                "side": "S",
+                "price": 500.0,
+                "quantity": 1,
+                "time_in_force": "ROD",
+                "price_flag": "LIMIT",
+                "ap_code": "AFTER_HOURS"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0, "message": "ok",
+                "data": {"client_order_id": "C-AH", "status": "SUBMITTED"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = TwClient::new(TwClient::default().config().clone().base_url(server.uri()));
+        let request = OrderRequest::new("C-AH", "S1", "2330", "S", 500.0, 1, "ROD", "LIMIT")
+            .with_ap_code(ApCode::AfterHours);
+        let status = client.submit_stock_order(&request).await.unwrap();
+        assert_eq!(status.status.as_deref(), Some("SUBMITTED"));
+    }
+
+    #[tokio::test]
     async fn submit_stock_order_promotes_nested_mock_execution_fields() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
