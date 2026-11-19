@@ -205,6 +205,29 @@ impl AClient {
         self.a_get("/v1/mock/account").await
     }
 
+    /// Calls `GET /v1/mock/account?account=<name>` for one named mock account.
+    ///
+    /// The A server keeps one mock book per account name; an empty or
+    /// unset name means `default`. Account names are restricted to
+    /// `[A-Za-z0-9_-]{1,32}` by the server, so they need no URL escaping.
+    pub async fn mock_account_for(&self, account: &str) -> Result<MockAccount> {
+        let account = account.trim();
+        if account.is_empty() {
+            return self.mock_account().await;
+        }
+        let valid = account.len() <= 32
+            && account
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            return Err(crate::error::Error::InvalidRequest(format!(
+                "invalid mock account name: {account:?}"
+            )));
+        }
+        self.a_get(&format!("/v1/mock/account?account={account}"))
+            .await
+    }
+
     /// Calls `POST /v1/mock/init_account` and returns the stored mock account.
     ///
     /// Re-initializing an existing account requires `reset = true`; otherwise
@@ -296,6 +319,7 @@ impl crate::client::broker::BrokerClient for AClient {
         request: &crate::types::MockAccountInitRequest,
     ) -> Result<crate::types::MockAccount> {
         let request = InitMockAccountRequest {
+            account: String::new(),
             cash: request.cash,
             positions: request
                 .positions
@@ -334,6 +358,7 @@ impl crate::client::broker::BrokerClient for AClient {
             quantity,
             dry_run: request.dry_run.unwrap_or(false),
             mock: request.mock.unwrap_or(false),
+            account: (!request.account.is_empty()).then(|| request.account.clone()),
         };
         let order = self.submit_order(&a_request).await?;
         Ok(order.into())
@@ -1001,6 +1026,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_account_for_selects_a_named_book() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mock/account"))
+            .and(query_param("account", "ex_t"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "cash": 100000.0,
+                "positions": [],
+                "created_at_ms": 1_u64,
+                "updated_at_ms": 1_u64
+            })))
+            .mount(&server)
+            .await;
+
+        let account = client(&server).mock_account_for("ex_t").await.unwrap();
+        assert_eq!(account.cash, 100000.0);
+        // An empty name degrades to the default book, not to a 404.
+        Mock::given(method("GET"))
+            .and(path("/v1/mock/account"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "cash": 1.0,
+                "positions": [],
+                "created_at_ms": 1_u64,
+                "updated_at_ms": 1_u64
+            })))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            client(&server).mock_account_for("  ").await.unwrap().cash,
+            1.0
+        );
+        // Names the server would reject never reach the wire.
+        assert!(client(&server).mock_account_for("ex t").await.is_err());
+    }
+
+    #[tokio::test]
     async fn mock_account_maps_both_error_body_shapes_to_api_error() {
         // `/v1` rewrites `{"error": msg}` into the `{code,message,detail}`
         // envelope (stock_broker_a_server `v1_error_middleware`). Both shapes
@@ -1059,6 +1120,7 @@ mod tests {
             .await;
 
         let request = InitMockAccountRequest {
+            account: String::new(),
             cash: 100000.0,
             positions: vec![MockPosition {
                 symbol: "518850".to_owned(),

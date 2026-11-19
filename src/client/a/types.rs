@@ -390,6 +390,10 @@ pub struct OrderRequest {
     /// `false`, so leaving it out keeps existing bodies byte-identical.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mock: bool,
+    /// mock 专用：落在服务端哪个模拟账户上。`None` = 服务端默认账户
+    /// （旧客户端不带这个字段，行为不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 impl OrderRequest {
@@ -411,7 +415,14 @@ impl OrderRequest {
             quantity,
             dry_run,
             mock: false,
+            account: None,
         }
+    }
+
+    /// Route a mock order to a specific server-side mock account.
+    pub fn with_account(mut self, account: impl Into<String>) -> Self {
+        self.account = Some(account.into());
+        self
     }
 
     /// Creates a mock order request.
@@ -635,10 +646,14 @@ pub struct MockAccount {
 
 /// Request body for `POST /v1/mock/init_account`.
 ///
-/// The server keeps exactly one mock account. Re-initializing an existing
-/// account requires [`Self::reset`]; otherwise the server answers `409`.
+/// The server keeps one mock account per account name (`default` when the
+/// field is empty). Re-initializing an existing account requires
+/// [`Self::reset`]; otherwise the server answers `409`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct InitMockAccountRequest {
+    /// Account name; empty means the server's default account.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
     /// Initial simulated cash.
     pub cash: f64,
     /// Initial simulated positions.
@@ -1435,6 +1450,7 @@ mod tests {
     #[test]
     fn init_mock_account_request_serializes_server_shape() {
         let request = InitMockAccountRequest {
+            account: String::new(),
             cash: 100000.0,
             positions: vec![MockPosition {
                 symbol: "518850".to_owned(),
