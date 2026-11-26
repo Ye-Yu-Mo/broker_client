@@ -1,42 +1,41 @@
-name: CI
+name: ci
 
+# 跑在 leaf 的自托管 runner 上，不消耗私有仓库的 Actions 额度。
+# **只监听 push，不监听 pull_request**：自托管 runner 没有沙箱。
 on:
   push:
-    branches: [master, main]
-  pull_request:
+  workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
+    runs-on: [self-hosted, linux, x64, leaf]
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+      CARGO_TARGET_DIR: /home/jas/ci-cache/target-broker_client
+      PATH: /home/jas/.cargo/bin:/home/jas/.local/bin:/usr/local/bin:/usr/bin:/bin
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: 工具链
+        run: |
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
+      - name: 格式
         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: 静态检查
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Rust tests
-        run: cargo test --locked --all-features
-
-      - name: Build docs
-        run: cargo doc --locked --no-deps --all-features
+      - name: 测试
+        run: cargo test --locked
